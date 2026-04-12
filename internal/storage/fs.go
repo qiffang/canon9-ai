@@ -20,10 +20,13 @@ type FS struct {
 	mu     sync.Mutex
 	events []Event // in-memory cache loaded from JSONL
 
-	// pageMu provides per-page locking to prevent concurrent writes from
-	// clobbering each other. Guards wiki page read-modify-write cycles.
-	pageMu   sync.Mutex
+	// pageMu provides per-page locking to prevent concurrent read/write/archive
+	// from clobbering each other's sidecar metadata.
+	pageMu    sync.Mutex
 	pageLocks map[string]*sync.Mutex
+
+	// indexMu serializes RebuildIndex calls.
+	indexMu sync.Mutex
 }
 
 // NewFS creates a filesystem-backed Store rooted at dataDir.
@@ -161,10 +164,18 @@ func (f *FS) ReadWikiIndex() (string, error) {
 }
 
 // ReadWikiPage reads a wiki page and its sidecar.
+// The sidecar writeback (access telemetry update) is done under the same
+// per-page lock as WriteWikiPage/ArchiveWikiPage to prevent read/write races
+// from clobbering provenance metadata.
 func (f *FS) ReadWikiPage(path string) (*WikiPage, error) {
 	if err := validateWikiPath(path); err != nil {
 		return nil, err
 	}
+
+	// Acquire per-page lock — same lock domain as Write/Archive.
+	mu := f.lockPage(path)
+	mu.Lock()
+	defer mu.Unlock()
 
 	fullPath := filepath.Join(f.wikiDir(), path)
 	content, err := os.ReadFile(fullPath)
@@ -335,46 +346,62 @@ func (f *FS) ArchiveWikiPage(path string, reason string) error {
 // RebuildIndex scans all active wiki pages and regenerates both:
 // - wiki/index.md (root routing table)
 // - wiki/{category}/index.md (per-category sub-indexes)
-// This ensures agents can read e.g. prospective/index.md to scan trigger conditions.
+//
+// Uses a snapshot approach: first collect all page paths and descriptions,
+// then write all index files at once. This avoids interleaving with concurrent
+// wiki mutations that could produce an inconsistent index.
 func (f *FS) RebuildIndex() error {
-	var sections []string
+	// indexMu serializes concurrent RebuildIndex calls.
+	f.indexMu.Lock()
+	defer f.indexMu.Unlock()
+
+	// Phase 1: Snapshot — collect page info without holding wiki locks.
+	type pageInfo struct {
+		relPath string
+		desc    string
+	}
 	categories := []string{"semantic", "episodic", "procedural", "prospective"}
+	catPages := make(map[string][]pageInfo)
 
 	for _, cat := range categories {
 		catDir := filepath.Join(f.wikiDir(), cat)
-		var pages []string
-
 		_ = filepath.Walk(catDir, func(path string, info os.FileInfo, err error) error {
 			if err != nil || info.IsDir() || !strings.HasSuffix(path, ".md") {
 				return nil
 			}
 			relPath, _ := filepath.Rel(f.wikiDir(), path)
 			if relPath == cat+"/index.md" {
-				return nil // skip category index files themselves
+				return nil
 			}
-
 			desc := extractPageDescription(path)
-			pages = append(pages, fmt.Sprintf("- [%s](%s) — %s", filepath.Base(relPath), relPath, desc))
+			catPages[cat] = append(catPages[cat], pageInfo{relPath: relPath, desc: desc})
 			return nil
 		})
+	}
 
-		// Write per-category sub-index.
-		catIndexPath := filepath.Join(catDir, "index.md")
+	// Phase 2: Write all index files from the snapshot.
+	var sections []string
+	for _, cat := range categories {
+		pages := catPages[cat]
+		var lines []string
+		for _, p := range pages {
+			lines = append(lines, fmt.Sprintf("- [%s](%s) — %s", filepath.Base(p.relPath), p.relPath, p.desc))
+		}
+
+		catIndexPath := filepath.Join(f.wikiDir(), cat, "index.md")
 		catContent := fmt.Sprintf("# %s\n\n", capitalize(cat))
-		if len(pages) == 0 {
+		if len(lines) == 0 {
 			catContent += "_No pages yet._\n"
 		} else {
-			catContent += strings.Join(pages, "\n") + "\n"
+			catContent += strings.Join(lines, "\n") + "\n"
 		}
 		_ = os.WriteFile(catIndexPath, []byte(catContent), 0644)
 
-		if len(pages) > 0 {
-			section := fmt.Sprintf("## %s\n\n%s", cat, strings.Join(pages, "\n"))
-			sections = append(sections, section)
+		if len(lines) > 0 {
+			sections = append(sections, fmt.Sprintf("## %s\n\n%s", cat, strings.Join(lines, "\n")))
 		}
 	}
 
-	// Write root index.
 	content := "# Wiki Index\n\n"
 	if len(sections) == 0 {
 		content += "_No pages yet._\n"

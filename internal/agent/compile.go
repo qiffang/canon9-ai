@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 )
 
@@ -60,7 +61,7 @@ const compileSystemPrompt = `You are the Compile Agent of a brain-inspired memor
 
 9. **Rebuild index** — Call rebuild_index() to regenerate the routing table.
 
-10. **Report** — Summarize what was done: events processed, pages created/updated/archived. End your report with a line: CURSOR:N where N is the new_cursor value from the read_events_since() response. This is critical for tracking progress.
+10. **Report** — Summarize what was done: events processed, pages created/updated/archived.
 
 ## Page Format
 
@@ -80,8 +81,7 @@ Content with source references [evt_xxx T1]
 - Be conservative with archiving. When in doubt, keep the page.
 - Always preserve source references when distilling.
 - Conflicts are valuable — don't resolve them by picking a side. Mark them clearly.
-- After significant changes, always rebuild_index().
-- You MUST report the CURSOR:N value at the end — this tracks which events have been processed.`
+- After significant changes, always rebuild_index().`
 
 // CompileAgent handles the compile() flow — global consolidation and pruning.
 type CompileAgent struct {
@@ -97,9 +97,8 @@ func NewCompileAgent(llm LLM, executor *ToolExecutor) *CompileAgent {
 }
 
 // Compile runs the full sleep cycle: distill + prune + rebuild index.
-// Returns the LLM's report and the new cursor position.
-// The cursor only advances to the new_cursor reported by read_events_since,
-// ensuring only actually-read events are marked as compiled.
+// The new cursor is extracted programmatically from the read_events_since tool
+// results — not from free-form LLM text — and clamped to [oldCursor, eventCount].
 func (a *CompileAgent) Compile(ctx context.Context, cursor uint64) (string, uint64, error) {
 	userMsg := fmt.Sprintf(`Run a full compile cycle.
 
@@ -110,59 +109,53 @@ Execute all three phases:
 2. Sleep pruning (archive stale pages per memory-type rules)
 3. Rebuild index
 
-IMPORTANT: At the end of your report, include the new_cursor value from the read_events_since() response on a line by itself: CURSOR:N
-This ensures we only advance the cursor to events you actually processed.`, cursor, cursor)
+Report what you did when finished.`, cursor, cursor)
 
-	result, err := a.runner.Run(ctx, compileSystemPrompt, CompileTools, userMsg)
+	// Track the last new_cursor from read_events_since tool calls.
+	var lastNewCursor uint64
+	foundCursor := false
+
+	cb := func(name string, input json.RawMessage, result string, err error) {
+		if name != "read_events_since" || err != nil {
+			return
+		}
+		var page struct {
+			NewCursor uint64 `json:"new_cursor"`
+		}
+		if json.Unmarshal([]byte(result), &page) == nil {
+			lastNewCursor = page.NewCursor
+			foundCursor = true
+		}
+	}
+
+	result, _, err := a.runner.RunWithCallback(ctx, compileSystemPrompt, CompileTools, userMsg, cb)
 	if err != nil {
 		return "", cursor, err
 	}
 
-	// Parse the CURSOR:N line from the LLM's response to get the real progress.
-	newCursor := parseCursorFromResponse(result, cursor)
+	// Only advance cursor if we actually got a value from the tool transcript.
+	if !foundCursor {
+		return result, cursor, nil
+	}
+
+	// Clamp: never go backward, never exceed current event count.
+	newCursor := lastNewCursor
+	if newCursor < cursor {
+		newCursor = cursor
+	}
+	eventCount := a.currentEventCount()
+	if newCursor > eventCount {
+		newCursor = eventCount
+	}
 
 	return result, newCursor, nil
 }
 
-// parseCursorFromResponse extracts CURSOR:N from the compile agent's response.
-// Falls back to the original cursor if not found (no progress).
-func parseCursorFromResponse(response string, fallback uint64) uint64 {
-	// Scan for "CURSOR:" prefix in response lines.
-	for _, line := range splitLines(response) {
-		trimmed := trimSpace(line)
-		if len(trimmed) > 7 && trimmed[:7] == "CURSOR:" {
-			var n uint64
-			if _, err := fmt.Sscanf(trimmed, "CURSOR:%d", &n); err == nil {
-				return n
-			}
-		}
+// currentEventCount returns the current number of events in the store.
+func (a *CompileAgent) currentEventCount() uint64 {
+	page, err := a.executor.store.ReadEventsSince(0)
+	if err != nil {
+		return 0
 	}
-	return fallback
-}
-
-func splitLines(s string) []string {
-	var lines []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			lines = append(lines, s[start:i])
-			start = i + 1
-		}
-	}
-	if start < len(s) {
-		lines = append(lines, s[start:])
-	}
-	return lines
-}
-
-func trimSpace(s string) string {
-	i := 0
-	for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r') {
-		i++
-	}
-	j := len(s)
-	for j > i && (s[j-1] == ' ' || s[j-1] == '\t' || s[j-1] == '\r') {
-		j--
-	}
-	return s[i:j]
+	return page.NewCursor
 }
