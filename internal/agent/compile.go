@@ -60,7 +60,7 @@ const compileSystemPrompt = `You are the Compile Agent of a brain-inspired memor
 
 9. **Rebuild index** — Call rebuild_index() to regenerate the routing table.
 
-10. **Report** — Summarize what was done: events processed, pages created/updated/archived.
+10. **Report** — Summarize what was done: events processed, pages created/updated/archived. End your report with a line: CURSOR:N where N is the new_cursor value from the read_events_since() response. This is critical for tracking progress.
 
 ## Page Format
 
@@ -80,7 +80,8 @@ Content with source references [evt_xxx T1]
 - Be conservative with archiving. When in doubt, keep the page.
 - Always preserve source references when distilling.
 - Conflicts are valuable — don't resolve them by picking a side. Mark them clearly.
-- After significant changes, always rebuild_index().`
+- After significant changes, always rebuild_index().
+- You MUST report the CURSOR:N value at the end — this tracks which events have been processed.`
 
 // CompileAgent handles the compile() flow — global consolidation and pruning.
 type CompileAgent struct {
@@ -96,28 +97,72 @@ func NewCompileAgent(llm LLM, executor *ToolExecutor) *CompileAgent {
 }
 
 // Compile runs the full sleep cycle: distill + prune + rebuild index.
+// Returns the LLM's report and the new cursor position.
+// The cursor only advances to the new_cursor reported by read_events_since,
+// ensuring only actually-read events are marked as compiled.
 func (a *CompileAgent) Compile(ctx context.Context, cursor uint64) (string, uint64, error) {
 	userMsg := fmt.Sprintf(`Run a full compile cycle.
 
-Current compile cursor: %d (read events starting from this position).
+Current compile cursor: %d (call read_events_since with cursor=%d to get unprocessed events).
 
 Execute all three phases:
 1. Distill new events into wiki
 2. Sleep pruning (archive stale pages per memory-type rules)
 3. Rebuild index
 
-Report what you did when finished.`, cursor)
+IMPORTANT: At the end of your report, include the new_cursor value from the read_events_since() response on a line by itself: CURSOR:N
+This ensures we only advance the cursor to events you actually processed.`, cursor, cursor)
 
 	result, err := a.runner.Run(ctx, compileSystemPrompt, CompileTools, userMsg)
 	if err != nil {
 		return "", cursor, err
 	}
 
-	// After compile, read events to get the new cursor position.
-	page, err := a.executor.store.ReadEventsSince(0)
-	if err != nil {
-		return result, cursor, nil
-	}
+	// Parse the CURSOR:N line from the LLM's response to get the real progress.
+	newCursor := parseCursorFromResponse(result, cursor)
 
-	return result, page.NewCursor, nil
+	return result, newCursor, nil
+}
+
+// parseCursorFromResponse extracts CURSOR:N from the compile agent's response.
+// Falls back to the original cursor if not found (no progress).
+func parseCursorFromResponse(response string, fallback uint64) uint64 {
+	// Scan for "CURSOR:" prefix in response lines.
+	for _, line := range splitLines(response) {
+		trimmed := trimSpace(line)
+		if len(trimmed) > 7 && trimmed[:7] == "CURSOR:" {
+			var n uint64
+			if _, err := fmt.Sscanf(trimmed, "CURSOR:%d", &n); err == nil {
+				return n
+			}
+		}
+	}
+	return fallback
+}
+
+func splitLines(s string) []string {
+	var lines []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			lines = append(lines, s[start:i])
+			start = i + 1
+		}
+	}
+	if start < len(s) {
+		lines = append(lines, s[start:])
+	}
+	return lines
+}
+
+func trimSpace(s string) string {
+	i := 0
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r') {
+		i++
+	}
+	j := len(s)
+	for j > i && (s[j-1] == ' ' || s[j-1] == '\t' || s[j-1] == '\r') {
+		j--
+	}
+	return s[i:j]
 }

@@ -3,6 +3,8 @@ package storage
 import (
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -101,6 +103,31 @@ func TestSearchWiki(t *testing.T) {
 	}
 }
 
+func TestSearchWikiIncludesArchive(t *testing.T) {
+	fs := newTestFS(t)
+
+	_ = fs.WriteWikiPage("episodic/2026-04-12/meeting.md", "# Meeting with Alice\n\nDiscussed schema.\n")
+	_ = fs.ArchiveWikiPage("episodic/2026-04-12/meeting.md", "distilled")
+
+	// Archive pages should be searchable.
+	results, err := fs.SearchWiki("Alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected search to find archived page")
+	}
+	found := false
+	for _, r := range results {
+		if strings.HasPrefix(r.Path, "archive/") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected result from archive/ path")
+	}
+}
+
 func TestArchiveWikiPage(t *testing.T) {
 	fs := newTestFS(t)
 
@@ -143,12 +170,49 @@ func TestRebuildIndex(t *testing.T) {
 		t.Fatal("expected non-empty index")
 	}
 
-	// Index should mention both pages.
-	if !containsStr(idx, "db9.md") {
+	if !strings.Contains(idx, "db9.md") {
 		t.Error("index should contain db9.md")
 	}
-	if !containsStr(idx, "deploy-drive9.md") {
+	if !strings.Contains(idx, "deploy-drive9.md") {
 		t.Error("index should contain deploy-drive9.md")
+	}
+}
+
+func TestRebuildIndexGeneratesCategorySubIndexes(t *testing.T) {
+	fs := newTestFS(t)
+
+	_ = fs.WriteWikiPage("prospective/notify-alice.md", "# Notify Alice\n\nWhen drive9 releases v1.0\n")
+	_ = fs.WriteWikiPage("semantic/projects/db9.md", "# DB9\n\nPartition tables.\n")
+
+	if err := fs.RebuildIndex(); err != nil {
+		t.Fatal(err)
+	}
+
+	// prospective/index.md should exist and list the page.
+	data, err := os.ReadFile(filepath.Join(fs.wikiDir(), "prospective", "index.md"))
+	if err != nil {
+		t.Fatalf("prospective/index.md should exist: %v", err)
+	}
+	if !strings.Contains(string(data), "notify-alice.md") {
+		t.Error("prospective/index.md should list notify-alice.md")
+	}
+
+	// semantic/index.md should exist.
+	data2, err := os.ReadFile(filepath.Join(fs.wikiDir(), "semantic", "index.md"))
+	if err != nil {
+		t.Fatalf("semantic/index.md should exist: %v", err)
+	}
+	if !strings.Contains(string(data2), "db9.md") {
+		t.Error("semantic/index.md should list db9.md")
+	}
+
+	// Empty categories should still get an index.
+	data3, err := os.ReadFile(filepath.Join(fs.wikiDir(), "episodic", "index.md"))
+	if err != nil {
+		t.Fatalf("episodic/index.md should exist: %v", err)
+	}
+	if !strings.Contains(string(data3), "No pages yet") {
+		t.Error("empty category index should say 'No pages yet'")
 	}
 }
 
@@ -166,8 +230,18 @@ func TestGetMemoryStats(t *testing.T) {
 	if stats.EventCount != 2 {
 		t.Errorf("expected 2 events, got %d", stats.EventCount)
 	}
+	if stats.UncompiledCount != 2 {
+		t.Errorf("expected 2 uncompiled, got %d", stats.UncompiledCount)
+	}
 	if stats.WikiPageCount != 1 {
 		t.Errorf("expected 1 wiki page, got %d", stats.WikiPageCount)
+	}
+
+	// After setting cursor, uncompiled count should update.
+	_ = fs.SetCompileCursor(1)
+	stats2, _ := fs.GetMemoryStats()
+	if stats2.UncompiledCount != 1 {
+		t.Errorf("expected 1 uncompiled after cursor=1, got %d", stats2.UncompiledCount)
 	}
 }
 
@@ -214,15 +288,104 @@ func TestEventPersistence(t *testing.T) {
 	}
 }
 
-func containsStr(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && findSubstr(s, substr))
+func TestCompileCursorPersistence(t *testing.T) {
+	dir := t.TempDir()
+
+	fs1, err := NewFS(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fs1.SetCompileCursor(42); err != nil {
+		t.Fatal(err)
+	}
+	if v := fs1.GetCompileCursor(); v != 42 {
+		t.Fatalf("expected cursor=42, got %d", v)
+	}
+
+	// Reload from disk — cursor should persist.
+	fs2, err := NewFS(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := fs2.GetCompileCursor(); v != 42 {
+		t.Fatalf("expected persisted cursor=42, got %d", v)
+	}
 }
 
-func findSubstr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
+func TestWriteWikiPageWithMeta(t *testing.T) {
+	fs := newTestFS(t)
+
+	err := fs.WriteWikiPageWithMeta(
+		"semantic/projects/db9.md",
+		"# DB9\n\nPartition tables [evt_042 T1]\n",
+		[]string{"evt_042"},
+		1,
+	)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return false
+
+	page, err := fs.ReadWikiPage("semantic/projects/db9.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Meta.SourceEvents) != 1 || page.Meta.SourceEvents[0] != "evt_042" {
+		t.Errorf("expected source_events=[evt_042], got %v", page.Meta.SourceEvents)
+	}
+	if page.Meta.TrustTierMax != 1 {
+		t.Errorf("expected trust_tier_max=1, got %d", page.Meta.TrustTierMax)
+	}
+
+	// Write again with additional source event — should be deduplicated.
+	err = fs.WriteWikiPageWithMeta(
+		"semantic/projects/db9.md",
+		"# DB9\n\nPartition tables [evt_042 T1] [evt_055 T2]\n",
+		[]string{"evt_042", "evt_055"},
+		2,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page2, err := fs.ReadWikiPage("semantic/projects/db9.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page2.Meta.SourceEvents) != 2 {
+		t.Errorf("expected 2 source events (deduplicated), got %v", page2.Meta.SourceEvents)
+	}
+	// Trust tier should stay at 1 (more trusted) not downgrade to 2.
+	if page2.Meta.TrustTierMax != 1 {
+		t.Errorf("expected trust_tier_max=1 (kept higher trust), got %d", page2.Meta.TrustTierMax)
+	}
+}
+
+func TestConcurrentPageWrites(t *testing.T) {
+	fs := newTestFS(t)
+
+	// Pre-create page.
+	_ = fs.WriteWikiPage("semantic/test.md", "initial")
+
+	// Concurrent writes to the same page should not lose data (page-level lock).
+	var wg sync.WaitGroup
+	n := 20
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			// Each writer reads then writes — the lock ensures serialization.
+			_ = fs.WriteWikiPage("semantic/test.md", strings.Repeat("x", i+1))
+		}(i)
+	}
+	wg.Wait()
+
+	// Page should exist and be readable (no corruption from concurrent writes).
+	page, err := fs.ReadWikiPage("semantic/test.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Content == "" {
+		t.Error("expected non-empty content after concurrent writes")
+	}
 }

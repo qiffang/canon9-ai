@@ -9,10 +9,10 @@ import (
 
 // ToolExecutor executes tool calls against the storage layer.
 type ToolExecutor struct {
-	store *storage.FS
+	store storage.Store
 }
 
-func NewToolExecutor(store *storage.FS) *ToolExecutor {
+func NewToolExecutor(store storage.Store) *ToolExecutor {
 	return &ToolExecutor{store: store}
 }
 
@@ -115,13 +115,15 @@ func (te *ToolExecutor) searchWiki(input json.RawMessage) (string, error) {
 
 func (te *ToolExecutor) writeWikiPage(input json.RawMessage) (string, error) {
 	var params struct {
-		Path    string `json:"path"`
-		Content string `json:"content"`
+		Path         string   `json:"path"`
+		Content      string   `json:"content"`
+		SourceEvents []string `json:"source_events,omitempty"`
+		TrustTier    int      `json:"trust_tier,omitempty"`
 	}
 	if err := json.Unmarshal(input, &params); err != nil {
 		return "", fmt.Errorf("parse write_wiki_page input: %w", err)
 	}
-	if err := te.store.WriteWikiPage(params.Path, params.Content); err != nil {
+	if err := te.store.WriteWikiPageWithMeta(params.Path, params.Content, params.SourceEvents, params.TrustTier); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf(`{"status": "ok", "path": "%s"}`, params.Path), nil

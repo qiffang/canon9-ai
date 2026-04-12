@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,7 +19,11 @@ type FS struct {
 
 	mu     sync.Mutex
 	events []Event // in-memory cache loaded from JSONL
-	cursor uint64  // compile cursor (last processed event index)
+
+	// pageMu provides per-page locking to prevent concurrent writes from
+	// clobbering each other. Guards wiki page read-modify-write cycles.
+	pageMu   sync.Mutex
+	pageLocks map[string]*sync.Mutex
 }
 
 // NewFS creates a filesystem-backed Store rooted at dataDir.
@@ -43,17 +48,34 @@ func NewFS(dataDir string) (*FS, error) {
 		}
 	}
 
-	fs := &FS{dataDir: dataDir}
+	fs := &FS{
+		dataDir:   dataDir,
+		pageLocks: make(map[string]*sync.Mutex),
+	}
 	if err := fs.loadEvents(); err != nil {
 		return nil, err
 	}
 	return fs, nil
 }
 
-func (f *FS) rawPath() string  { return filepath.Join(f.dataDir, "raw", "events.jsonl") }
-func (f *FS) wikiDir() string  { return filepath.Join(f.dataDir, "wiki") }
-func (f *FS) metaDir() string  { return filepath.Join(f.dataDir, "wiki", ".meta") }
-func (f *FS) indexPath() string { return filepath.Join(f.dataDir, "wiki", "index.md") }
+func (f *FS) rawPath() string    { return filepath.Join(f.dataDir, "raw", "events.jsonl") }
+func (f *FS) wikiDir() string    { return filepath.Join(f.dataDir, "wiki") }
+func (f *FS) metaDir() string    { return filepath.Join(f.dataDir, "wiki", ".meta") }
+func (f *FS) indexPath() string  { return filepath.Join(f.dataDir, "wiki", "index.md") }
+func (f *FS) cursorPath() string { return filepath.Join(f.dataDir, "raw", "cursor") }
+
+// lockPage returns a per-page mutex. Concurrent writes to different pages
+// proceed in parallel; writes to the same page are serialized.
+func (f *FS) lockPage(path string) *sync.Mutex {
+	f.pageMu.Lock()
+	defer f.pageMu.Unlock()
+	m, ok := f.pageLocks[path]
+	if !ok {
+		m = &sync.Mutex{}
+		f.pageLocks[path] = m
+	}
+	return m
+}
 
 func (f *FS) loadEvents() error {
 	path := f.rawPath()
@@ -168,7 +190,8 @@ func (f *FS) ReadWikiPage(path string) (*WikiPage, error) {
 	}, nil
 }
 
-// SearchWiki does a case-insensitive text search across active wiki pages.
+// SearchWiki does a case-insensitive text search across wiki pages,
+// including archived pages (per design: archive is searchable for recovery).
 func (f *FS) SearchWiki(query string) ([]SearchResult, error) {
 	var results []SearchResult
 	queryLower := strings.ToLower(query)
@@ -178,8 +201,7 @@ func (f *FS) SearchWiki(query string) ([]SearchResult, error) {
 			return nil // skip errors
 		}
 		if info.IsDir() {
-			name := info.Name()
-			if name == ".meta" || name == "archive" {
+			if info.Name() == ".meta" {
 				return filepath.SkipDir
 			}
 			return nil
@@ -211,10 +233,23 @@ func (f *FS) SearchWiki(query string) ([]SearchResult, error) {
 }
 
 // WriteWikiPage creates or updates a wiki page and its sidecar.
+// Page-level locking prevents concurrent writes from clobbering each other.
 func (f *FS) WriteWikiPage(path string, content string) error {
+	return f.WriteWikiPageWithMeta(path, content, nil, 0)
+}
+
+// WriteWikiPageWithMeta creates or updates a wiki page with optional source event tracking.
+// sourceEvents are appended to the sidecar's SourceEvents (deduplicated).
+// trustTier updates TrustTierMax if it's higher (lower number = more trusted).
+func (f *FS) WriteWikiPageWithMeta(path string, content string, sourceEvents []string, trustTier int) error {
 	if err := validateWikiPath(path); err != nil {
 		return err
 	}
+
+	// Acquire per-page lock to serialize writes to the same page.
+	mu := f.lockPage(path)
+	mu.Lock()
+	defer mu.Unlock()
 
 	fullPath := filepath.Join(f.wikiDir(), path)
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
@@ -225,16 +260,35 @@ func (f *FS) WriteWikiPage(path string, content string) error {
 		return fmt.Errorf("write page %s: %w", path, err)
 	}
 
-	// Create sidecar if it doesn't exist.
+	// Create or update sidecar.
 	meta := f.readSidecar(path)
+	now := time.Now().UTC().Format(time.RFC3339)
 	if meta.CreatedAt == "" {
-		now := time.Now().UTC().Format(time.RFC3339)
 		meta.CreatedAt = now
 		meta.LastAccessed = now
 		meta.MemoryType = inferMemoryType(path)
-		_ = f.writeSidecar(path, meta)
 	}
 
+	// Append source events (deduplicated).
+	if len(sourceEvents) > 0 {
+		existing := make(map[string]bool, len(meta.SourceEvents))
+		for _, e := range meta.SourceEvents {
+			existing[e] = true
+		}
+		for _, e := range sourceEvents {
+			if !existing[e] {
+				meta.SourceEvents = append(meta.SourceEvents, e)
+				existing[e] = true
+			}
+		}
+	}
+
+	// Update trust tier max (lower number = more trusted).
+	if trustTier > 0 && (meta.TrustTierMax == 0 || trustTier < meta.TrustTierMax) {
+		meta.TrustTierMax = trustTier
+	}
+
+	_ = f.writeSidecar(path, meta)
 	return nil
 }
 
@@ -243,6 +297,11 @@ func (f *FS) ArchiveWikiPage(path string, reason string) error {
 	if err := validateWikiPath(path); err != nil {
 		return err
 	}
+
+	// Acquire per-page lock.
+	mu := f.lockPage(path)
+	mu.Lock()
+	defer mu.Unlock()
 
 	srcPath := filepath.Join(f.wikiDir(), path)
 	if _, err := os.Stat(srcPath); os.IsNotExist(err) {
@@ -273,7 +332,10 @@ func (f *FS) ArchiveWikiPage(path string, reason string) error {
 	return nil
 }
 
-// RebuildIndex scans all active wiki pages and regenerates index.md.
+// RebuildIndex scans all active wiki pages and regenerates both:
+// - wiki/index.md (root routing table)
+// - wiki/{category}/index.md (per-category sub-indexes)
+// This ensures agents can read e.g. prospective/index.md to scan trigger conditions.
 func (f *FS) RebuildIndex() error {
 	var sections []string
 	categories := []string{"semantic", "episodic", "procedural", "prospective"}
@@ -288,14 +350,23 @@ func (f *FS) RebuildIndex() error {
 			}
 			relPath, _ := filepath.Rel(f.wikiDir(), path)
 			if relPath == cat+"/index.md" {
-				return nil // skip category index files
+				return nil // skip category index files themselves
 			}
 
-			// Read first non-empty, non-comment line as description.
 			desc := extractPageDescription(path)
 			pages = append(pages, fmt.Sprintf("- [%s](%s) — %s", filepath.Base(relPath), relPath, desc))
 			return nil
 		})
+
+		// Write per-category sub-index.
+		catIndexPath := filepath.Join(catDir, "index.md")
+		catContent := fmt.Sprintf("# %s\n\n", capitalize(cat))
+		if len(pages) == 0 {
+			catContent += "_No pages yet._\n"
+		} else {
+			catContent += strings.Join(pages, "\n") + "\n"
+		}
+		_ = os.WriteFile(catIndexPath, []byte(catContent), 0644)
 
 		if len(pages) > 0 {
 			section := fmt.Sprintf("## %s\n\n%s", cat, strings.Join(pages, "\n"))
@@ -303,6 +374,7 @@ func (f *FS) RebuildIndex() error {
 		}
 	}
 
+	// Write root index.
 	content := "# Wiki Index\n\n"
 	if len(sections) == 0 {
 		content += "_No pages yet._\n"
@@ -317,8 +389,9 @@ func (f *FS) RebuildIndex() error {
 func (f *FS) GetMemoryStats() (*MemoryStats, error) {
 	f.mu.Lock()
 	eventCount := len(f.events)
-	compileCursor := f.cursor
 	f.mu.Unlock()
+
+	compileCursor := f.GetCompileCursor()
 
 	wikiCount := 0
 	archiveCount := 0
@@ -347,18 +420,22 @@ func (f *FS) GetMemoryStats() (*MemoryStats, error) {
 	}, nil
 }
 
-// SetCompileCursor updates the compile cursor (used by compile agent).
-func (f *FS) SetCompileCursor(cursor uint64) {
-	f.mu.Lock()
-	f.cursor = cursor
-	f.mu.Unlock()
+// SetCompileCursor persists the compile cursor to disk and updates in-memory state.
+func (f *FS) SetCompileCursor(cursor uint64) error {
+	return os.WriteFile(f.cursorPath(), []byte(strconv.FormatUint(cursor, 10)), 0644)
 }
 
-// GetCompileCursor returns the current compile cursor.
+// GetCompileCursor reads the persisted compile cursor from disk.
 func (f *FS) GetCompileCursor() uint64 {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.cursor
+	data, err := os.ReadFile(f.cursorPath())
+	if err != nil {
+		return 0
+	}
+	v, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v
 }
 
 // --- Sidecar helpers ---
@@ -426,6 +503,13 @@ func inferMemoryType(path string) string {
 		return parts[0]
 	}
 	return ""
+}
+
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }
 
 func extractPageDescription(path string) string {

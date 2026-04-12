@@ -12,13 +12,13 @@ import (
 
 // Handler implements the engram9 HTTP API.
 type Handler struct {
-	store   *storage.FS
+	store   storage.Store
 	ingest  *agent.IngestAgent
 	query   *agent.QueryAgent
 	compile *agent.CompileAgent
 
-	compileMu     sync.Mutex
-	compileCursor uint64
+	// compileMu serializes compile requests (only one compile at a time).
+	compileMu sync.Mutex
 }
 
 // New creates a new API handler with all agents wired up.
@@ -111,9 +111,12 @@ func (h *Handler) handleRecall(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleCompile(w http.ResponseWriter, r *http.Request) {
+	// Only one compile at a time.
 	h.compileMu.Lock()
-	cursor := h.compileCursor
-	h.compileMu.Unlock()
+	defer h.compileMu.Unlock()
+
+	// Read cursor from persistent storage — single source of truth.
+	cursor := h.store.GetCompileCursor()
 
 	log.Printf("[api] compile: cursor=%d", cursor)
 	result, newCursor, err := h.compile.Compile(r.Context(), cursor)
@@ -123,11 +126,14 @@ func (h *Handler) handleCompile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.compileMu.Lock()
-	h.compileCursor = newCursor
-	h.compileMu.Unlock()
+	// Persist new cursor only if progress was made.
+	if newCursor > cursor {
+		if err := h.store.SetCompileCursor(newCursor); err != nil {
+			log.Printf("[api] persist cursor error: %v", err)
+		}
+	}
 
-	log.Printf("[api] compile done: new_cursor=%d", newCursor)
+	log.Printf("[api] compile done: cursor %d -> %d", cursor, newCursor)
 	writeJSON(w, http.StatusOK, APIResponse{Result: result})
 }
 
