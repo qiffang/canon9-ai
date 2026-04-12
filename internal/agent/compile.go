@@ -111,12 +111,21 @@ Execute all three phases:
 
 Report what you did when finished.`, cursor, cursor)
 
-	// Track the last new_cursor from read_events_since tool calls.
+	// Track new_cursor only from a read_events_since call whose input cursor
+	// matches our expected start cursor. Accept only the first valid match to
+	// prevent later spurious/retry calls from overwriting the value.
 	var lastNewCursor uint64
 	foundCursor := false
 
 	cb := func(name string, input json.RawMessage, result string, err error) {
-		if name != "read_events_since" || err != nil {
+		if name != "read_events_since" || err != nil || foundCursor {
+			return
+		}
+		// Validate the tool was called with the correct starting cursor.
+		var args struct {
+			Cursor uint64 `json:"cursor"`
+		}
+		if json.Unmarshal(input, &args) != nil || args.Cursor != cursor {
 			return
 		}
 		var page struct {
