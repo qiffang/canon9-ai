@@ -157,9 +157,15 @@ export function registerHooks(
   // --------------------------------------------------------------------------
   // before_reset — save session summary before /reset wipes context
   // --------------------------------------------------------------------------
-  api.on("before_reset", async (event: unknown) => {
+  api.on("before_reset", async (event: unknown, context: unknown) => {
     try {
-      const evt = event as { messages?: unknown[]; reason?: string };
+      const evt = event as {
+        messages?: unknown[];
+        reason?: string;
+        sessionId?: string;
+        agentId?: string;
+      };
+      const hookCtx = (context ?? {}) as HookContext;
       const messages = evt?.messages;
       if (!messages || messages.length === 0) return;
 
@@ -169,7 +175,7 @@ export function registerHooks(
         const m = msg as Record<string, unknown>;
         if (m.role !== "user") continue;
         if (typeof m.content === "string" && m.content.length > 10) {
-          userTexts.push(m.content);
+          userTexts.push(stripInjectedContext(m.content));
         }
       }
 
@@ -180,7 +186,18 @@ export function registerHooks(
         .map((t) => t.slice(0, 300))
         .join(" | ");
 
-      await backend.remember(`[session-summary before reset] ${summary}`);
+      const ctx: Record<string, string> = {};
+      const sessionId =
+        evt.sessionId ?? hookCtx.sessionId ?? hookCtx.sessionKey;
+      if (sessionId) ctx.session_id = sessionId;
+      const agentId =
+        evt.agentId ?? hookCtx.agentId ?? options?.fallbackAgentId;
+      if (agentId) ctx.agent_id = agentId;
+
+      await backend.remember(
+        `[session-summary before reset] ${summary}`,
+        Object.keys(ctx).length > 0 ? ctx : undefined
+      );
       logger.info("[engram9] Session context saved before reset");
     } catch (err) {
       logger.error(`[engram9] before_reset save failed: ${String(err)}`);
