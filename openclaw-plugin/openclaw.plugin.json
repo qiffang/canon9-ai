@@ -1,0 +1,38 @@
+{
+  "id": "engram9",
+  "name": "Engram9 Memory",
+  "description": "Brain-inspired agent memory — three-timing consolidation model with semantic/episodic/procedural/prospective memory types.",
+  "kind": "tool",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "apiUrl": {
+        "type": "string",
+        "description": "engram9 server URL"
+      },
+      "apiKey": {
+        "type": "string",
+        "description": "API key for authentication (optional)"
+      },
+      "agentName": {
+        "type": "string",
+        "description": "Agent identity for session tracking"
+      }
+    }
+  },
+  "uiHints": {
+    "apiUrl": {
+      "label": "Server URL",
+      "placeholder": "http://localhost:9090"
+    },
+    "apiKey": {
+      "label": "API Key",
+      "placeholder": "optional",
+      "sensitive": true
+    },
+    "agentName": {
+      "label": "Agent Name",
+      "placeholder": "agent"
+    }
+  }
+}
