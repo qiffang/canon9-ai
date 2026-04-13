@@ -47,6 +47,7 @@ func TestRememberEndpoint(t *testing.T) {
 	h := newTestHandler(t)
 	srv := httptest.NewServer(h.Routes())
 	defer srv.Close()
+	defer h.Wait() // wait for background goroutines before TempDir cleanup
 
 	resp, err := http.Post(srv.URL+"/remember",
 		"application/json",

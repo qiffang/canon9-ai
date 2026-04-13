@@ -25,6 +25,9 @@ type Handler struct {
 
 	// pendingIntegrations tracks the number of async wiki integrations in flight.
 	pendingIntegrations atomic.Int64
+
+	// wg tracks background goroutines for graceful shutdown / testing.
+	wg sync.WaitGroup
 }
 
 // New creates a new API handler with all agents wired up.
@@ -114,7 +117,9 @@ func (h *Handler) handleRemember(w http.ResponseWriter, r *http.Request) {
 
 	// Asynchronous: wiki integration in background.
 	h.pendingIntegrations.Add(1)
+	h.wg.Add(1)
 	go func() {
+		defer h.wg.Done()
 		defer h.pendingIntegrations.Add(-1)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -124,6 +129,9 @@ func (h *Handler) handleRemember(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[api] integrate error (event %s): %v", eventID, err)
 		} else {
 			log.Printf("[api] integrate done: %s", eventID)
+			if err := h.store.RebuildIndex(); err != nil {
+				log.Printf("[api] rebuild index error: %v", err)
+			}
 		}
 	}()
 
@@ -204,6 +212,9 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		PendingIntegrations: h.pendingIntegrations.Load(),
 	})
 }
+
+// Wait blocks until all background integrations finish. Used for testing and graceful shutdown.
+func (h *Handler) Wait() { h.wg.Wait() }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
