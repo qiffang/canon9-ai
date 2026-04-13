@@ -216,6 +216,54 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 // Wait blocks until all background integrations finish. Used for testing and graceful shutdown.
 func (h *Handler) Wait() { h.wg.Wait() }
 
+// runCompile executes a single compile cycle. Safe for concurrent use (serialized by compileMu).
+func (h *Handler) runCompile(ctx context.Context) {
+	h.compileMu.Lock()
+	defer h.compileMu.Unlock()
+
+	cursor := h.store.GetCompileCursor()
+	stats, _ := h.store.GetMemoryStats()
+	if stats != nil && stats.UncompiledCount == 0 {
+		return // nothing to compile
+	}
+
+	log.Printf("[auto-compile] starting: cursor=%d, uncompiled=%d", cursor, stats.UncompiledCount)
+	_, newCursor, err := h.compile.Compile(ctx, cursor)
+	if err != nil {
+		log.Printf("[auto-compile] error: %v", err)
+		return
+	}
+
+	if newCursor > cursor {
+		if err := h.store.SetCompileCursor(newCursor); err != nil {
+			log.Printf("[auto-compile] persist cursor error: %v", err)
+		}
+	}
+	log.Printf("[auto-compile] done: cursor %d -> %d", cursor, newCursor)
+}
+
+// StartAutoCompile runs compile cycles periodically in the background.
+// It stops when ctx is cancelled.
+func (h *Handler) StartAutoCompile(ctx context.Context, interval time.Duration) {
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		log.Printf("[auto-compile] enabled: every %s", interval)
+		for {
+			select {
+			case <-ctx.Done():
+				log.Print("[auto-compile] stopped")
+				return
+			case <-ticker.C:
+				h.runCompile(ctx)
+			}
+		}
+	}()
+}
+
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)

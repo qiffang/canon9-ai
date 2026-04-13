@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/qiffang/engram9/internal/agent"
 	"github.com/qiffang/engram9/internal/api"
@@ -15,6 +17,7 @@ func main() {
 	addr := flag.String("addr", ":9090", "listen address")
 	dataDir := flag.String("data", "./data", "data directory")
 	model := flag.String("model", "", "LLM model name")
+	compileInterval := flag.Duration("compile-interval", 30*time.Minute, "auto-compile interval (0 to disable)")
 	flag.Parse()
 
 	var llm agent.LLM
@@ -37,6 +40,10 @@ func main() {
 	handler, err := api.New(*dataDir, llm)
 	if err != nil {
 		log.Fatalf("init: %v", err)
+	}
+
+	if *compileInterval > 0 {
+		handler.StartAutoCompile(context.Background(), *compileInterval)
 	}
 
 	log.Printf("engram9 listening on %s (data: %s)", *addr, *dataDir)
