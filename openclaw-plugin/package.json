@@ -1,0 +1,44 @@
+{
+  "name": "@engram9/openclaw-plugin",
+  "version": "0.1.0",
+  "description": "OpenClaw plugin for engram9 — brain-inspired agent memory with three-timing consolidation",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "qiffang",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qiffang/engram9.git",
+    "directory": "openclaw-plugin"
+  },
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "memory",
+    "agent-memory",
+    "brain-inspired",
+    "engram9"
+  ],
+  "files": [
+    "*.ts",
+    "openclaw.plugin.json"
+  ],
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.1.26"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
