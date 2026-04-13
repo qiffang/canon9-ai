@@ -151,6 +151,23 @@ func (f *FS) ReadEventsSince(cursor uint64) (*EventsPage, error) {
 	}, nil
 }
 
+// ReadRecentEvents returns the last n events from the log.
+func (f *FS) ReadRecentEvents(n int) ([]Event, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	total := len(f.events)
+	if n <= 0 || total == 0 {
+		return nil, nil
+	}
+	if n > total {
+		n = total
+	}
+	out := make([]Event, n)
+	copy(out, f.events[total-n:])
+	return out, nil
+}
+
 // ReadWikiIndex returns the contents of wiki/index.md.
 func (f *FS) ReadWikiIndex() (string, error) {
 	data, err := os.ReadFile(f.indexPath())

@@ -12,6 +12,9 @@ type Store interface {
 	// ReadEventsSince returns events after the given cursor position.
 	ReadEventsSince(cursor uint64) (*EventsPage, error)
 
+	// ReadRecentEvents returns the last n events from the log.
+	ReadRecentEvents(n int) ([]Event, error)
+
 	// --- Wiki read operations ---
 
 	// ReadWikiIndex returns the contents of wiki/index.md.

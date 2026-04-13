@@ -60,12 +60,15 @@ func TestRememberEndpoint(t *testing.T) {
 		t.Fatalf("status=%d, want 200", resp.StatusCode)
 	}
 
-	var result APIResponse
+	var result RememberResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Result == "" {
-		t.Error("expected non-empty result")
+	if result.EventID == "" {
+		t.Error("expected non-empty event_id")
+	}
+	if !strings.HasPrefix(result.EventID, "evt_") {
+		t.Errorf("event_id=%q, want evt_ prefix", result.EventID)
 	}
 }
 
@@ -138,7 +141,7 @@ func TestStatusEndpoint(t *testing.T) {
 		t.Fatalf("status=%d, want 200", resp.StatusCode)
 	}
 
-	var stats storage.MemoryStats
+	var stats StatusResponse
 	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
 		t.Fatal(err)
 	}

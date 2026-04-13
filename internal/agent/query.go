@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
+
+	"github.com/qiffang/engram9/internal/storage"
 )
 
 const querySystemPrompt = `You are the Query Agent of a brain-inspired memory system. Your role is to recall information — like the brain reconstructing memories from fragments in the current context, not just reading back stored text.
@@ -55,11 +58,27 @@ func NewQueryAgent(llm LLM, executor *ToolExecutor) *QueryAgent {
 }
 
 // Recall answers a question by reconstructing knowledge from the memory system.
-func (a *QueryAgent) Recall(ctx context.Context, question string, ctxInfo map[string]string) (string, error) {
+// recentEvents are injected into the user message so the LLM can use them
+// even if wiki integration hasn't completed yet.
+func (a *QueryAgent) Recall(ctx context.Context, question string, ctxInfo map[string]string, recentEvents []storage.Event) (string, error) {
 	userMsg := fmt.Sprintf("Recall/answer this question:\n\n%s", question)
 	if len(ctxInfo) > 0 {
 		ctxJSON, _ := json.Marshal(ctxInfo)
 		userMsg += fmt.Sprintf("\n\nCurrent context: %s", string(ctxJSON))
+	}
+	if len(recentEvents) > 0 {
+		userMsg += "\n\n---\nRecent events (may not be in wiki yet):\n"
+		for _, ev := range recentEvents {
+			var parts []string
+			parts = append(parts, fmt.Sprintf("[%s] %s", ev.ID, ev.Content))
+			if ev.ActiveProject != "" {
+				parts = append(parts, fmt.Sprintf("  project=%s", ev.ActiveProject))
+			}
+			if ev.ActiveTask != "" {
+				parts = append(parts, fmt.Sprintf("  task=%s", ev.ActiveTask))
+			}
+			userMsg += strings.Join(parts, "") + "\n"
+		}
 	}
 
 	return a.runner.Run(ctx, querySystemPrompt, QueryTools, userMsg)

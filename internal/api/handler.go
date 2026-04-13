@@ -1,10 +1,13 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/qiffang/engram9/internal/agent"
 	"github.com/qiffang/engram9/internal/storage"
@@ -19,6 +22,9 @@ type Handler struct {
 
 	// compileMu serializes compile requests (only one compile at a time).
 	compileMu sync.Mutex
+
+	// pendingIntegrations tracks the number of async wiki integrations in flight.
+	pendingIntegrations atomic.Int64
 }
 
 // New creates a new API handler with all agents wired up.
@@ -66,6 +72,11 @@ type APIResponse struct {
 	Error  string `json:"error,omitempty"`
 }
 
+// RememberResponse is the response for POST /remember.
+type RememberResponse struct {
+	EventID string `json:"event_id"`
+}
+
 func (h *Handler) handleRemember(w http.ResponseWriter, r *http.Request) {
 	var req RememberRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -78,14 +89,45 @@ func (h *Handler) handleRemember(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("[api] remember: %s", truncate(req.Text, 80))
-	result, err := h.ingest.Remember(r.Context(), req.Text, req.Context)
+
+	// Synchronous: write raw event immediately.
+	ev := storage.Event{
+		Content:       req.Text,
+		Actor:         req.Context["actor"],
+		Source:        req.Context["source"],
+		SessionID:     req.Context["session_id"],
+		ActiveProject: req.Context["active_project"],
+		ActiveTask:    req.Context["active_task"],
+		Durability:    "long-term",
+		Actionability: "informational",
+		SourceType:    "user",
+		EvidenceKind:  "user_statement",
+		TrustTier:     1,
+	}
+
+	eventID, err := h.store.AppendEvent(ev)
 	if err != nil {
-		log.Printf("[api] remember error: %v", err)
+		log.Printf("[api] remember append error: %v", err)
 		writeJSON(w, http.StatusInternalServerError, APIResponse{Error: err.Error()})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, APIResponse{Result: result})
+	// Asynchronous: wiki integration in background.
+	h.pendingIntegrations.Add(1)
+	go func() {
+		defer h.pendingIntegrations.Add(-1)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+
+		if err := h.ingest.Integrate(ctx, eventID, req.Text, req.Context); err != nil {
+			log.Printf("[api] integrate error (event %s): %v", eventID, err)
+		} else {
+			log.Printf("[api] integrate done: %s", eventID)
+		}
+	}()
+
+	writeJSON(w, http.StatusOK, RememberResponse{EventID: eventID})
 }
 
 func (h *Handler) handleRecall(w http.ResponseWriter, r *http.Request) {
@@ -100,7 +142,14 @@ func (h *Handler) handleRecall(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("[api] recall: %s", truncate(req.Question, 80))
-	result, err := h.query.Recall(r.Context(), req.Question, req.Context)
+
+	// Inject recent events so the LLM can answer even if wiki integration is still pending.
+	var recentEvents []storage.Event
+	if h.pendingIntegrations.Load() > 0 {
+		recentEvents, _ = h.store.ReadRecentEvents(10)
+	}
+
+	result, err := h.query.Recall(r.Context(), req.Question, req.Context, recentEvents)
 	if err != nil {
 		log.Printf("[api] recall error: %v", err)
 		writeJSON(w, http.StatusInternalServerError, APIResponse{Error: err.Error()})
@@ -137,6 +186,12 @@ func (h *Handler) handleCompile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, APIResponse{Result: result})
 }
 
+// StatusResponse extends MemoryStats with runtime info.
+type StatusResponse struct {
+	storage.MemoryStats
+	PendingIntegrations int64 `json:"pending_integrations"`
+}
+
 func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	stats, err := h.store.GetMemoryStats()
 	if err != nil {
@@ -144,7 +199,10 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, stats)
+	writeJSON(w, http.StatusOK, StatusResponse{
+		MemoryStats:         *stats,
+		PendingIntegrations: h.pendingIntegrations.Load(),
+	})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
