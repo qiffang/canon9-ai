@@ -2,7 +2,7 @@
   "id": "engram9",
   "name": "Engram9 Memory",
   "description": "Brain-inspired agent memory — three-timing consolidation model with semantic/episodic/procedural/prospective memory types.",
-  "kind": "memory",
+  "kind": "tool",
   "configSchema": {
     "type": "object",
     "properties": {

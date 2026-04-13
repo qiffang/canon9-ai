@@ -239,12 +239,19 @@ export function registerHooks(
         const role = typeof m.role === "string" ? m.role : "";
         if (!role) continue;
 
+        // Skip low-value tool messages: cron noise and this plugin's own
+        // memory_* calls/results. Re-ingesting memory tool output would cause
+        // self-feedback loops and pollute the knowledge base.
         if (
-          role === "toolResult" &&
-          typeof m.toolName === "string" &&
-          m.toolName === "cron"
+          (role === "toolResult" || role === "tool_use") &&
+          typeof m.toolName === "string"
         ) {
-          continue;
+          if (
+            m.toolName === "cron" ||
+            m.toolName.startsWith("memory_")
+          ) {
+            continue;
+          }
         }
 
         let content = "";
