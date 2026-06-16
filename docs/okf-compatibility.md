@@ -77,9 +77,9 @@ See [Commit Queue](../semantic/commit-queue.md) for details.
 Related: [Shadow Upload](../procedural/shadow-upload.md)
 ```
 
-### Legacy (planned import/migration)
+### Legacy migration
 
-Wiki-style links will be accepted during import and converted to standard Markdown links (not yet implemented):
+Wiki-style links are accepted by `engram9 migrate-okf` and converted to standard Markdown links:
 
 ```markdown
 <!-- Legacy format (accepted on import) -->
@@ -88,6 +88,46 @@ See [[semantic/commit-queue.md]] for details.
 <!-- Converted to canonical format -->
 See [Commit Queue](../semantic/commit-queue.md) for details.
 ```
+
+## Legacy migration command
+
+`engram9 migrate-okf <bundle-dir>` scans Markdown files and reports files that would change. It does not rewrite by default.
+
+```bash
+# Dry-run only
+engram9 migrate-okf ./data/wiki
+
+# Rewrite files in place and create .bak backups
+engram9 migrate-okf --write ./data/wiki
+
+# CI guard: fail if any legacy file still needs migration
+engram9 migrate-okf --check ./data/wiki
+```
+
+Migration behavior:
+
+- Top-of-file HTML comments such as `<!-- compiled_from: evt_001, evt_002 -->`, `<!-- last_compiled: ... -->`, `<!-- memory_type: semantic -->`, and `<!-- trust_tier: 1 -->` become YAML frontmatter.
+- Missing fields are inferred from path and content where possible: `memory_type` from the top-level folder, `type` from memory type, `title` from the first heading, and `description` from the first body paragraph.
+- Existing YAML-frontmatter pages keep their frontmatter and only have legacy `[[wikilinks]]` converted.
+- Structural `index.md` files do not receive frontmatter; their links are converted only.
+- Links inside fenced code blocks and inline code spans are left unchanged.
+
+## OKF import/export boundary
+
+Current CLI support is intentionally narrow:
+
+- `engram9 validate [--strict] <bundle-dir>` validates an OKF-compatible bundle against the engram9 profile.
+- `engram9 migrate-okf <bundle-dir>` converts legacy engram9 Markdown into the OKF-compatible page shape.
+
+Full OKF import/export is deferred. It should not be documented as available until these acceptance criteria are implemented:
+
+- `engram9 export okf <data-dir> --out <bundle-dir>` writes a self-contained OKF bundle from the runtime `wiki/` directory without requiring the HTTP server.
+- `engram9 import okf <bundle-dir> --data <data-dir>` imports external OKF Markdown into `wiki/`, preserves unknown frontmatter fields, and produces sidecar metadata for engram9-only runtime fields.
+- Import must be non-destructive by default: report conflicts and require an explicit overwrite flag before replacing existing pages.
+- Export followed by `engram9 validate --strict <bundle-dir>` must pass on the generated bundle.
+- Import followed by export should preserve page content, standard Markdown links, and unknown frontmatter fields.
+
+Until that surface exists, `migrate-okf` is the compatibility bridge for existing engram9 data, not a general OKF importer.
 
 ## Validation rules
 
@@ -140,6 +180,7 @@ knowledge-bundle/
 
 ## Compatibility guarantees
 
-1. (Target) Any OKF consumer will be able to read engram9 wiki pages — unknown engram9 fields are ignored per spec.
-2. (Planned) Engram9 will import any OKF bundle — missing engram9 profile fields will be populated with defaults during compile.
-3. `engram9 validate --strict` enforces the full engram9 profile by treating warnings as validation failure; `engram9 validate` reports warnings but exits successfully when there are no hard errors.
+1. Any OKF consumer can read migrated engram9 wiki pages — unknown engram9 fields are ignored per spec.
+2. `engram9 migrate-okf` converts legacy HTML-comment metadata and `[[wikilinks]]` into OKF-compatible YAML frontmatter and standard Markdown links. Dry-run is the default; `--write` rewrites files in place and creates `.bak` backups by default.
+3. Full OKF import/export remains a future CLI surface; current compatibility is validation plus legacy-to-OKF migration.
+4. `engram9 validate --strict` enforces the full engram9 profile by treating warnings as validation failure; `engram9 validate` reports warnings but exits successfully when there are no hard errors.
