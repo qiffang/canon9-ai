@@ -5,6 +5,10 @@
 //
 // Usage:
 //
+//	# Consume an OKF bundle directly (read-only)
+//	engram9-mcp -bundle ./examples/repo-memory
+//
+//	# Consume the engram9 runtime data directory (read-write)
 //	engram9-mcp -data ./data
 //
 // The server reads JSON-RPC 2.0 requests from stdin and writes responses to
@@ -22,21 +26,44 @@ import (
 )
 
 func main() {
-	dataDir := flag.String("data", "./data", "data directory (same as engram9 HTTP server)")
+	dataDir := flag.String("data", "", "runtime data directory (same as engram9 HTTP server)")
+	bundleDir := flag.String("bundle", "", "OKF bundle directory to consume (read-only)")
 	flag.Parse()
 
 	// Direct all log output to stderr so stdout is clean JSON-RPC.
 	log.SetOutput(os.Stderr)
 
-	store, err := storage.NewFS(*dataDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: init store: %v\n", err)
+	if *dataDir == "" && *bundleDir == "" {
+		fmt.Fprintln(os.Stderr, "error: specify either -data (runtime store) or -bundle (OKF bundle)")
+		flag.Usage()
+		os.Exit(1)
+	}
+	if *dataDir != "" && *bundleDir != "" {
+		fmt.Fprintln(os.Stderr, "error: -data and -bundle are mutually exclusive")
+		flag.Usage()
 		os.Exit(1)
 	}
 
-	server := mcp.NewServer(store)
+	var store storage.Store
+	var err error
 
-	log.Printf("engram9-mcp started (data: %s)", *dataDir)
+	if *bundleDir != "" {
+		store, err = storage.NewBundleFS(*bundleDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: init bundle store: %v\n", err)
+			os.Exit(1)
+		}
+		log.Printf("engram9-mcp started in bundle mode (bundle: %s)", *bundleDir)
+	} else {
+		store, err = storage.NewFS(*dataDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: init runtime store: %v\n", err)
+			os.Exit(1)
+		}
+		log.Printf("engram9-mcp started in runtime mode (data: %s)", *dataDir)
+	}
+
+	server := mcp.NewServer(store)
 	if err := server.Serve(os.Stdin, os.Stdout); err != nil {
 		log.Fatalf("serve: %v", err)
 	}

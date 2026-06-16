@@ -35,9 +35,13 @@ func NewServer(store storage.Store) *Server {
 
 type jsonRPCRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id,omitempty"` // may be null for notifications
+	ID      json.RawMessage `json:"id,omitempty"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params,omitempty"`
+
+	// hasID distinguishes "id" absent from "id": null.
+	// JSON-RPC 2.0: requests have "id", notifications do not.
+	hasID bool
 }
 
 type jsonRPCResponse struct {
@@ -122,8 +126,8 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 			continue
 		}
 
-		var req jsonRPCRequest
-		if err := json.Unmarshal([]byte(line), &req); err != nil {
+		req, err := parseRequest([]byte(line))
+		if err != nil {
 			log.Printf("[mcp] invalid JSON-RPC: %v", err)
 			resp := jsonRPCResponse{
 				JSONRPC: "2.0",
@@ -131,6 +135,12 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 				Error:   &jsonRPCError{Code: -32700, Message: "parse error"},
 			}
 			writeResponse(w, resp)
+			continue
+		}
+
+		// JSON-RPC 2.0: notifications (no "id" field) must not receive responses.
+		if !req.hasID {
+			s.handleNotification(req)
 			continue
 		}
 
@@ -143,13 +153,37 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 	return scanner.Err()
 }
 
+// parseRequest unmarshals a JSON-RPC message and detects whether "id" is present.
+// JSON-RPC 2.0 distinguishes requests (have "id") from notifications (no "id").
+func parseRequest(data []byte) (jsonRPCRequest, error) {
+	var req jsonRPCRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return req, err
+	}
+	// Check whether "id" key exists in the raw JSON.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return req, err
+	}
+	_, req.hasID = raw["id"]
+	return req, nil
+}
+
+// handleNotification processes JSON-RPC notifications (no "id" → no response).
+func (s *Server) handleNotification(req jsonRPCRequest) {
+	// MCP defines several notification methods; log unrecognized ones.
+	switch {
+	case strings.HasPrefix(req.Method, "notifications/"):
+		// Known MCP notification namespace — silently accept.
+	default:
+		log.Printf("[mcp] unhandled notification: %s", req.Method)
+	}
+}
+
 func (s *Server) handleRequest(req jsonRPCRequest) *jsonRPCResponse {
 	switch req.Method {
 	case "initialize":
 		return s.handleInitialize(req)
-	case "notifications/initialized":
-		// Client acknowledgment — no response needed.
-		return nil
 	case "tools/list":
 		return s.handleToolsList(req)
 	case "tools/call":

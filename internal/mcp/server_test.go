@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -138,23 +140,42 @@ func TestMethodNotFound(t *testing.T) {
 	}
 }
 
-func TestNotificationInitialized(t *testing.T) {
-	// notifications/initialized should not produce a response.
-	s := setupServer(t)
-
-	req := jsonRPCRequest{
-		JSONRPC: "2.0",
-		Method:  "notifications/initialized",
-	}
-	reqData, _ := json.Marshal(req)
+// sendNotification sends a JSON-RPC notification (no "id" field) and returns stdout.
+func sendNotification(t *testing.T, s *Server, method string) string {
+	t.Helper()
+	// Build JSON manually to ensure no "id" key at all.
+	raw := fmt.Sprintf(`{"jsonrpc":"2.0","method":"%s"}`, method)
 
 	var out bytes.Buffer
-	input := bytes.NewReader(append(reqData, '\n'))
+	input := bytes.NewReader([]byte(raw + "\n"))
 	if err := s.Serve(input, &out); err != nil {
 		t.Fatalf("serve: %v", err)
 	}
-	if out.Len() != 0 {
-		t.Errorf("expected no output for notification, got %q", out.String())
+	return out.String()
+}
+
+func TestNotificationInitialized(t *testing.T) {
+	s := setupServer(t)
+	got := sendNotification(t, s, "notifications/initialized")
+	if got != "" {
+		t.Errorf("expected no output for notification, got %q", got)
+	}
+}
+
+func TestNotificationPing_NoResponse(t *testing.T) {
+	// A ping without "id" is a notification — must not get a response.
+	s := setupServer(t)
+	got := sendNotification(t, s, "ping")
+	if got != "" {
+		t.Errorf("expected no output for notification ping, got %q", got)
+	}
+}
+
+func TestNotificationUnknownMethod_NoResponse(t *testing.T) {
+	s := setupServer(t)
+	got := sendNotification(t, s, "some/unknown")
+	if got != "" {
+		t.Errorf("expected no output for unknown notification, got %q", got)
 	}
 }
 
@@ -539,6 +560,127 @@ func TestInvalidJSON(t *testing.T) {
 	}
 	if resp.Error.Code != -32700 {
 		t.Errorf("error code = %d, want -32700", resp.Error.Code)
+	}
+}
+
+func TestBundleMode_SearchFindsPages(t *testing.T) {
+	// Create a fake OKF bundle directory with .md files at the root.
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "semantic"), 0755)
+	os.WriteFile(filepath.Join(dir, "semantic", "test-concept.md"), []byte("# Test\n\nAlice prefers dark mode."), 0644)
+	os.WriteFile(filepath.Join(dir, "index.md"), []byte("# Index\n\n- [test-concept](semantic/test-concept.md)"), 0644)
+
+	store, err := storage.NewBundleFS(dir)
+	if err != nil {
+		t.Fatalf("NewBundleFS: %v", err)
+	}
+	s := NewServer(store)
+
+	// Search should find content.
+	resp := call(t, s, "tools/call", 1, map[string]any{
+		"name":      "search_concepts",
+		"arguments": map[string]any{"query": "dark mode"},
+	})
+	data, _ := json.Marshal(resp.Result)
+	var result toolsCallResult
+	json.Unmarshal(data, &result)
+
+	if result.IsError {
+		t.Fatalf("search error: %s", result.Content[0].Text)
+	}
+	if !strings.Contains(result.Content[0].Text, "dark mode") {
+		t.Errorf("expected 'dark mode' in results, got %q", result.Content[0].Text)
+	}
+}
+
+func TestBundleMode_ReadConcept(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "semantic"), 0755)
+	os.WriteFile(filepath.Join(dir, "semantic", "commit-queue.md"), []byte("# Commit Queue\n\nAsync uploads."), 0644)
+
+	store, err := storage.NewBundleFS(dir)
+	if err != nil {
+		t.Fatalf("NewBundleFS: %v", err)
+	}
+	s := NewServer(store)
+
+	resp := call(t, s, "tools/call", 1, map[string]any{
+		"name":      "read_concept",
+		"arguments": map[string]any{"path": "semantic/commit-queue.md"},
+	})
+	data, _ := json.Marshal(resp.Result)
+	var result toolsCallResult
+	json.Unmarshal(data, &result)
+
+	if result.IsError {
+		t.Fatalf("read error: %s", result.Content[0].Text)
+	}
+	if !strings.Contains(result.Content[0].Text, "Async uploads") {
+		t.Errorf("expected content, got %q", result.Content[0].Text)
+	}
+}
+
+func TestBundleMode_Neighbors(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "index.md"), []byte("# Wiki Index\n\n## semantic\n\n- db9"), 0644)
+
+	store, err := storage.NewBundleFS(dir)
+	if err != nil {
+		t.Fatalf("NewBundleFS: %v", err)
+	}
+	s := NewServer(store)
+
+	resp := call(t, s, "tools/call", 1, map[string]any{
+		"name":      "neighbors",
+		"arguments": map[string]any{},
+	})
+	data, _ := json.Marshal(resp.Result)
+	var result toolsCallResult
+	json.Unmarshal(data, &result)
+
+	if !strings.Contains(result.Content[0].Text, "semantic") {
+		t.Errorf("expected index content, got %q", result.Content[0].Text)
+	}
+}
+
+func TestBundleMode_WriteMemoryRejected(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.NewBundleFS(dir)
+	if err != nil {
+		t.Fatalf("NewBundleFS: %v", err)
+	}
+	s := NewServer(store)
+
+	resp := call(t, s, "tools/call", 1, map[string]any{
+		"name":      "write_memory",
+		"arguments": map[string]any{"text": "should fail"},
+	})
+	data, _ := json.Marshal(resp.Result)
+	var result toolsCallResult
+	json.Unmarshal(data, &result)
+
+	if !result.IsError {
+		t.Error("expected isError=true for write to bundle store")
+	}
+	if !strings.Contains(result.Content[0].Text, "read-only") {
+		t.Errorf("expected read-only error, got %q", result.Content[0].Text)
+	}
+}
+
+func TestBundleMode_NoDirCreation(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.NewBundleFS(dir)
+	if err != nil {
+		t.Fatalf("NewBundleFS: %v", err)
+	}
+	_ = NewServer(store)
+
+	// Verify no wiki/ or raw/ directories were created.
+	if _, err := os.Stat(filepath.Join(dir, "wiki")); !os.IsNotExist(err) {
+		t.Error("bundle mode should not create wiki/ directory")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "raw")); !os.IsNotExist(err) {
+		t.Error("bundle mode should not create raw/ directory")
 	}
 }
 
