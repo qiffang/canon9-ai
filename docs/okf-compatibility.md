@@ -112,6 +112,23 @@ Migration behavior:
 - Structural `index.md` files do not receive frontmatter; their links are converted only.
 - Links inside fenced code blocks and inline code spans are left unchanged.
 
+## OKF import/export boundary
+
+Current CLI support is intentionally narrow:
+
+- `engram9 validate [--strict] <bundle-dir>` validates an OKF-compatible bundle against the engram9 profile.
+- `engram9 migrate-okf <bundle-dir>` converts legacy engram9 Markdown into the OKF-compatible page shape.
+
+Full OKF import/export is deferred. It should not be documented as available until these acceptance criteria are implemented:
+
+- `engram9 export okf <data-dir> --out <bundle-dir>` writes a self-contained OKF bundle from the runtime `wiki/` directory without requiring the HTTP server.
+- `engram9 import okf <bundle-dir> --data <data-dir>` imports external OKF Markdown into `wiki/`, preserves unknown frontmatter fields, and produces sidecar metadata for engram9-only runtime fields.
+- Import must be non-destructive by default: report conflicts and require an explicit overwrite flag before replacing existing pages.
+- Export followed by `engram9 validate --strict <bundle-dir>` must pass on the generated bundle.
+- Import followed by export should preserve page content, standard Markdown links, and unknown frontmatter fields.
+
+Until that surface exists, `migrate-okf` is the compatibility bridge for existing engram9 data, not a general OKF importer.
+
 ## Validation rules
 
 The `engram9 validate` subcommand checks a knowledge bundle against this profile:

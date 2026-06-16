@@ -109,6 +109,16 @@ The memory taxonomy follows Tulving's classification (1972). The compile agent m
 
 ## Quick start
 
+### OKF CLI surface
+
+Current CLI support covers validation and legacy migration:
+
+- `engram9 validate [--strict] <bundle-dir>` checks an OKF-compatible bundle.
+- `engram9 migrate-okf <bundle-dir>` converts legacy engram9 Markdown into OKF-compatible pages.
+
+Full `engram9 export okf` / `engram9 import okf` commands are deferred; see [docs/okf-compatibility.md](docs/okf-compatibility.md) for the acceptance criteria.
+
+
 ```bash
 # Build
 go build -o engram9 ./cmd/engram9
