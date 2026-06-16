@@ -44,7 +44,7 @@ contradicts: []                       # Paths of pages with conflicting informat
 
 | Field | Level | Type | Description |
 |---|---|---|---|
-| `type` | OKF required | string | Concept type. Values: `concept`, `procedure`, `decision`, `person`, `project`, `event` |
+| `type` | OKF required | string | Page type. Values: `concept`, `procedure`, `decision`, `person`, `project`, `event`, `index` |
 | `title` | Engram9 required | string | Human-readable page title |
 | `description` | Engram9 required | string | One-line summary used by the query agent for index routing |
 | `timestamp` | Engram9 required | string (ISO 8601) | When this page was last compiled/updated |
@@ -65,6 +65,7 @@ contradicts: []                       # Paths of pages with conflicting informat
 | `person` | A person profile | "Alice — backend engineer" |
 | `project` | A project or component description | "Drive9 FUSE mount" |
 | `event` | A specific occurrence with context | "PR #565 review — found force-due race" |
+| `index` | A routing table / table of contents | "engram9 Knowledge Index" |
 
 ## Link format
 
@@ -96,16 +97,16 @@ See [Commit Queue](../semantic/commit-queue.md) for details.
 ### Errors (hard fail)
 
 - Missing `type` field (OKF violation)
-- Invalid `type` value (not in allowed set)
 - Invalid `timestamp` format (not ISO 8601)
 - Invalid `memory_type` value (not in allowed set)
+
+Note: unknown `type` values are **not** a hard error — OKF does not restrict `type` to a closed set. Engram9 recognizes the values listed above; unknown types are accepted but produce a warning in `--strict` mode.
 
 ### Warnings (soft, promoted to error with `--strict`)
 
 - Missing engram9 profile required fields (`title`, `description`, `timestamp`, `memory_type`)
 - Broken internal links (target file does not exist)
 - Missing `source_events` (no provenance)
-- Unknown frontmatter fields (may indicate typo)
 
 ### Tolerated (per OKF spec)
 

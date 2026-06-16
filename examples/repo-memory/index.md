@@ -1,5 +1,5 @@
 ---
-type: concept
+type: index
 title: "engram9 Knowledge Index"
 description: "Routing table for engram9 project knowledge"
 timestamp: "2026-06-16T12:00:00Z"
