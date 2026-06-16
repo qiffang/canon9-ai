@@ -6,6 +6,8 @@ engram9 turns raw conversations, repos, docs, and tool traces into git-native kn
 
 Knowledge bundles are plain Markdown files with YAML frontmatter, following the [Open Knowledge Format (OKF)](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) spec. They live in your repo, can be `git diff`'d, reviewed in PRs, and consumed by any OKF-compatible tool.
 
+> **Status**: The runtime is being migrated from a legacy wiki format (HTML-comment metadata, `[[wikilinks]]`) to OKF-compatible YAML frontmatter output. The schema, examples, and API described below reflect the target architecture. See [docs/okf-compatibility.md](docs/okf-compatibility.md) for the full OKF profile specification and which features are planned vs implemented.
+
 ## Why engram9?
 
 AI agents lose context between sessions. Today's solutions have tradeoffs:
