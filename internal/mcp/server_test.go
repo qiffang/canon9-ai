@@ -667,6 +667,43 @@ func TestBundleMode_WriteMemoryRejected(t *testing.T) {
 	}
 }
 
+func TestBundleMode_MemoryStatusArchiveCount(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "semantic"), 0755)
+	os.MkdirAll(filepath.Join(dir, "archive", "semantic"), 0755)
+	os.WriteFile(filepath.Join(dir, "semantic", "active.md"), []byte("# Active"), 0644)
+	os.WriteFile(filepath.Join(dir, "archive", "semantic", "old.md"), []byte("# Old"), 0644)
+
+	store, err := storage.NewBundleFS(dir)
+	if err != nil {
+		t.Fatalf("NewBundleFS: %v", err)
+	}
+	s := NewServer(store)
+
+	resp := call(t, s, "tools/call", 1, map[string]any{
+		"name":      "memory_status",
+		"arguments": map[string]any{},
+	})
+	data, _ := json.Marshal(resp.Result)
+	var result toolsCallResult
+	json.Unmarshal(data, &result)
+
+	if result.IsError {
+		t.Fatalf("error: %s", result.Content[0].Text)
+	}
+
+	var stats storage.MemoryStats
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &stats); err != nil {
+		t.Fatalf("unmarshal stats: %v", err)
+	}
+	if stats.WikiPageCount != 1 {
+		t.Errorf("wiki_page_count = %d, want 1", stats.WikiPageCount)
+	}
+	if stats.ArchivedPageCount != 1 {
+		t.Errorf("archived_page_count = %d, want 1", stats.ArchivedPageCount)
+	}
+}
+
 func TestBundleMode_NoDirCreation(t *testing.T) {
 	dir := t.TempDir()
 	store, err := storage.NewBundleFS(dir)
