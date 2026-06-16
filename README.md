@@ -1,193 +1,154 @@
 # engram9
 
-**A brain-inspired memory system for AI agents — no vectors, no full-text search, just LLM + structured wiki.**
+**An OKF-compatible knowledge compiler for AI agents.**
 
-engram9 gives AI agents a long-term memory that works like the human brain: new information is immediately woven into an evolving knowledge graph of Markdown pages, recalled through reconstructive retrieval, and consolidated during periodic "sleep cycles" that distill, prune, and strengthen memories over time.
+engram9 turns raw conversations, repos, docs, and tool traces into git-native knowledge bundles that agents can read, cite, recall, and improve over time.
 
-Unlike vector databases or RAG pipelines, engram9 uses **LLM-as-PageRank**: the language model itself acts as the ranking, routing, and consolidation engine — reading a compact wiki index to navigate directly to relevant knowledge pages, much like PageRank routes web traffic through link structure.
+Knowledge bundles are plain Markdown files with YAML frontmatter, following the [Open Knowledge Format (OKF)](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) spec. They live in your repo, can be `git diff`'d, reviewed in PRs, and consumed by any OKF-compatible tool.
 
-## Why not vectors or full-text search?
+> **Status**: The runtime is being migrated from a legacy wiki format (HTML-comment metadata, `[[wikilinks]]`) to OKF-compatible YAML frontmatter output. The schema, examples, and API described below reflect the target architecture. See [docs/okf-compatibility.md](docs/okf-compatibility.md) for the full OKF profile specification and which features are planned vs implemented.
 
-| Approach | How it retrieves | Limitation |
+## Why engram9?
+
+AI agents lose context between sessions. Today's solutions have tradeoffs:
+
+| Approach | How it works | Limitation |
 |---|---|---|
-| **Vector DB (RAG)** | Cosine similarity on embeddings | Shallow semantic match; no reasoning over structure; retrieval quality degrades as corpus grows |
-| **Full-text search** | BM25 / keyword match | No semantic understanding; misses paraphrases and implicit connections |
-| **engram9** | LLM reads a wiki index → navigates to pages → reconstructs answer | Scales via structured routing, not brute-force similarity; knowledge improves over time through consolidation |
+| **Vector DB (RAG)** | Embed chunks, retrieve by cosine similarity | No reasoning over structure; retrieval degrades as corpus grows |
+| **MEMORY.md** | Hand-maintained Markdown file | Doesn't scale; no automated consolidation; single-agent only |
+| **Chat history replay** | Feed prior conversation back to context | Token-expensive; no distillation; irrelevant noise |
+| **engram9** | LLM compiles raw events into structured, linked OKF knowledge pages | Scales via structured routing; knowledge improves over time; any agent can consume |
 
-The wiki index acts as a **learned routing table** — analogous to PageRank's link graph — letting the LLM jump directly to the 1–3 most relevant pages instead of scanning thousands of chunks. As knowledge accumulates, the compile agent restructures and cross-links pages, continuously improving retrieval quality.
+## How it works
 
-## Architecture
+engram9 uses three LLM-powered agents to manage a knowledge lifecycle:
 
 ```
-┌─────────────────────────────────────────────────┐
-│                  engram9 server                  │
-│                                                  │
-│   POST /remember    POST /recall    POST /compile│
-│                                                  │
-│   ┌────────────┐ ┌────────────┐ ┌────────────┐  │
-│   │   Ingest   │ │   Query    │ │  Compile   │  │
-│   │   Agent    │ │   Agent    │ │   Agent    │  │
-│   │            │ │            │ │            │  │
-│   │ encode +   │ │ recall +   │ │ distill +  │  │
-│   │ weave into │ │ reconstruct│ │ prune +    │  │
-│   │ wiki       │ │ from wiki  │ │ consolidate│  │
-│   └─────┬──────┘ └─────┬──────┘ └─────┬──────┘  │
-│         └───────────────┼──────────────┘         │
-│                         ▼                        │
-│    ┌──────────────────────────────────────────┐  │
-│    │  raw/events.jsonl    wiki/ (Markdown)    │  │
-│    └──────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────┘
+Raw events (conversations, tool output, docs)
+        |
+        v
+  +-----------+     +-----------+     +-----------+
+  |  Ingest   | --> |   Query   | --> |  Compile  |
+  |  Agent    |     |   Agent   |     |   Agent   |
+  +-----------+     +-----------+     +-----------+
+  Encode new        Recall +          Distill,
+  facts into        reconstruct       consolidate,
+  wiki pages        from wiki         prune, link
+        |               |                 |
+        +-------+-------+---------+-------+
+                |                  |
+                v                  v
+     raw/events.jsonl         wiki/ (OKF bundle)
 ```
 
-### Three-timing consolidation (inspired by neuroscience)
+1. **Ingest**: New information is immediately woven into existing wiki pages, with source provenance tracked.
+2. **Query**: Retrieval is reconstructive — the LLM reads a compact index, navigates to relevant pages, and synthesizes an answer with citations.
+3. **Compile**: Periodic consolidation distills episodic knowledge into semantic facts, detects contradictions, prunes stale pages, and strengthens cross-links.
 
-The human brain doesn't consolidate memory at a single point — it does so at **three distinct moments**, each at a different granularity:
+## OKF compatibility
 
-| Timing | Brain analogy | What engram9 does | Agent |
-|---|---|---|---|
-| **Encoding** | Hippocampus immediately links new info to existing networks | Ingest agent reads wiki index, weaves new facts into 1–3 related pages | `ingest_agent` |
-| **Retrieval** | Every recall is reconstruction, not playback; strengthens connections | Query agent synthesizes across pages, fixes errors, archives new insights | `query_agent` |
-| **Sleep** | Hippocampal replay → neocortex; episodic → semantic distillation | Compile agent globally distills, detects contradictions, prunes stale pages | `compile_agent` |
+Wiki pages follow the OKF schema — each page is a Markdown file with YAML frontmatter:
 
-### Wiki structure (memory taxonomy)
+```markdown
+---
+type: concept
+title: "Commit Queue State Machine"
+description: "Drive9 FUSE commit queue lifecycle: delayed, dispatched, in-flight, done"
+timestamp: "2026-06-16T10:00:00Z"
+memory_type: semantic
+source_events:
+  - evt_042
+  - evt_055
+trust_tier: T1
+---
+
+# Commit Queue State Machine
+
+The commit queue manages async uploads with a 4-state lifecycle...
+
+Related: [Shadow Upload](../procedural/shadow-upload.md) | [Write Policy](../semantic/write-policy.md)
+```
+
+### Field classification
+
+| Field | Requirement | Description |
+|---|---|---|
+| `type` | **OKF required** | Concept type (e.g., `concept`, `procedure`, `decision`) |
+| `title` | Engram9 profile | Human-readable title |
+| `description` | Engram9 profile | One-line summary |
+| `timestamp` | Engram9 profile | When this knowledge was last compiled |
+| `memory_type` | Engram9 profile | `semantic`, `episodic`, `procedural`, `prospective` |
+| `source_events` | Engram9 profile | Raw event IDs that contributed to this page |
+| `trust_tier` | Engram9 profile | `T1` (direct statement), `T2` (tool output), `T3` (second-hand) |
+
+OKF consumers that don't understand engram9 profile fields will ignore them gracefully (per OKF spec). Engram9 profile fields enable richer recall, provenance tracking, and consolidation decisions.
+
+### Links
+
+Target output uses standard Markdown links:
+
+```markdown
+Related: [Alice](../semantic/people/alice.md)
+```
+
+Legacy `[[wikilink]]` syntax is planned for import/migration support (not yet implemented) and will not be used in new output.
+
+## Wiki structure
 
 ```
 wiki/
-├── index.md              # Auto-generated routing table (the "PageRank")
-├── semantic/             # Decontextualized knowledge (facts, people, projects)
+├── index.md              # Auto-generated routing table
+├── semantic/             # Decontextualized facts (people, projects, APIs)
 ├── episodic/             # Contextual experiences (who/what/when/where)
-├── procedural/           # How-to knowledge (runbooks, workflows)
+├── procedural/           # How-to knowledge (runbooks, workflows, recipes)
 ├── prospective/          # Future intentions with trigger conditions
-└── archive/              # Forgotten pages (searchable, recoverable)
+└── archive/              # Deprioritized pages (searchable, recoverable)
 ```
 
-Each page type mirrors a distinct memory system from Tulving's taxonomy (1972):
+The memory taxonomy follows Tulving's classification (1972). The compile agent moves knowledge through this lifecycle: episodic experiences are distilled into semantic facts, which are cross-linked into procedural runbooks.
 
-- **semantic/** — "Paris is the capital of France" — persists indefinitely
-- **episodic/** — "Had lunch with Alice on April 13" — distilled into semantic, then archived
-- **procedural/** — "How to deploy TiKV" — extremely durable, rarely forgotten
-- **prospective/** — "Remind me to tell Alice when v2 ships" — auto-triggered on context match
-- **archive/** — Not deleted, just deprioritized — still reachable via `search_wiki()`
-
-### Forgetting is a feature
-
-engram9 implements active forgetting modeled after the brain's synaptic homeostasis hypothesis (Tononi & Cirelli, 2003):
-
-- **Episodic pages** are aggressively pruned after their core knowledge is distilled into semantic pages
-- **Semantic pages** are never archived due to inactivity — only when explicitly superseded
-- **Retrieval strengthens memory** — each `recall` updates access patterns in sidecar metadata, influencing future compile decisions
-- **Archive ≠ delete** — archived pages are removed from the index but remain searchable, just like how "forgotten" memories can resurface with the right cue
-
-## Deployment modes
-
-engram9 is designed to be flexible:
-
-### Mode 1: Standalone server
-
-Run as an independent memory service with its own LLM:
+## Quick start
 
 ```bash
-# Using Anthropic
+# Build
+go build -o engram9 ./cmd/engram9
+
+# Run with Anthropic
 ANTHROPIC_API_KEY=sk-xxx ./engram9 -addr :9090 -data ./data
 
-# Using any OpenAI-compatible API (Qwen, DeepSeek, local models, etc.)
+# Run with any OpenAI-compatible API
 LLM_PROVIDER=openai OPENAI_API_KEY=xxx OPENAI_BASE_URL=https://your-api/v1 \
   ./engram9 -addr :9090 -data ./data -model your-model
-```
-
-### Mode 2: Agent-local memory
-
-Embed engram9 as a local memory layer for your AI agent, using the agent's own LLM:
-
-```bash
-# Your agent's LLM handles both reasoning and memory consolidation
-LLM_PROVIDER=openai OPENAI_BASE_URL=http://localhost:11434/v1 \
-  ./engram9 -data ./agent-memory -model llama3
-```
-
-### Mode 3: Shared memory service
-
-Deploy once, let multiple agents share a memory:
-
-```bash
-# Deploy on Kubernetes / ECS / Fly.io
-# Multiple agents POST to the same /remember and /recall endpoints
-curl -X POST https://memory.internal/remember \
-  -d '{"text": "...", "context": {"agent": "coder", "project": "engram9"}}'
 ```
 
 ## API
 
 ```bash
-# Store a memory (returns instantly, wiki integration runs async)
+# Store a memory
 curl -X POST /remember \
   -d '{"text": "Alice prefers dark mode", "context": {"project": "ui"}}'
-# → {"event_id": "evt_20260413_143022_a7f3"}
 
-# Recall (reconstructive retrieval, not keyword search)
+# Recall (reconstructive retrieval with citations)
 curl -X POST /recall \
   -d '{"question": "What are Alice'\''s UI preferences?"}'
-# → {"result": "Alice prefers dark mode [evt_xxx T1]. No other UI preferences recorded."}
 
-# Trigger sleep consolidation
+# Trigger consolidation
 curl -X POST /compile -d '{}'
 
 # System status
 curl GET /status
-# → {"event_count": 42, "wiki_page_count": 12, "pending_integrations": 0, ...}
 ```
 
-## How it works: LLM-as-PageRank
+## Design
 
-Traditional search engines use PageRank to determine which pages are most authoritative based on link structure. engram9 applies the same principle, but with an LLM as the ranking engine:
+engram9 draws from three sources:
 
-1. **Index = Link graph.** The auto-generated `index.md` is a compact routing table listing every active wiki page with a one-line description. This is the LLM's "link graph."
-
-2. **LLM = PageRank.** When a query arrives, the LLM reads the index and decides which 1–3 pages are most relevant — effectively computing a query-specific PageRank in a single inference step.
-
-3. **Cross-references = Backlinks.** Wiki pages link to each other with `[[semantic/people/alice.md]]` notation. The compile agent continuously discovers and adds missing cross-references, strengthening the link graph over time.
-
-4. **Consolidation = Link refinement.** Each compile cycle restructures the wiki: merging redundant pages, splitting oversized pages, adding cross-references, and archiving stale content. This continuously improves the routing quality — analogous to how PageRank improves as the web's link structure matures.
-
-5. **Access patterns = Click-through data.** Every page read updates sidecar metadata (`access_dates`, `last_accessed`). The compile agent uses this signal to decide what to keep and what to archive — similar to how search engines use click-through rates to refine rankings.
-
-## Source trust & provenance
-
-Every fact in the wiki is traceable to its source event:
-
-```markdown
-## Table Design
-- Uses partition tables [evt_042 T1] [evt_055 T2]
-- Benchmarked at 3x faster for large queries [evt_061 T1]
-- First proposed by [[semantic/people/alice.md]] [evt_042]
-```
-
-Trust tiers: **T1** = user direct statement, **T2** = tool output / inference, **T3** = second-hand.
-
-## Building
-
-```bash
-go build -o engram9 ./cmd/engram9
-go test ./...
-```
-
-## Docker
-
-```bash
-make docker-build
-# or
-docker build -t engram9 .
-```
-
-## Inspiration
-
-engram9 synthesizes ideas from three sources:
-
+- **[Open Knowledge Format (OKF)](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md)** — Standard for agent-readable knowledge as Markdown + YAML frontmatter
 - **[Karpathy's LLM Wiki](https://x.com/karpathy)** — Raw/wiki separation, compile-to-Markdown, index routing, source tracing
-- **[Google Always-On Memory Agent](https://github.com/GoogleCloudPlatform/generative-ai/tree/main/gemini/agents/always-on-memory-agent)** — Multi-agent orchestration, background consolidation, tool-function API boundaries
-- **Neuroscience** — Tulving's memory taxonomy, Ebbinghaus forgetting curve, Nader's reconsolidation theory, Tononi's synaptic homeostasis hypothesis
+- **Neuroscience** — Tulving's memory taxonomy, three-timing consolidation (encoding, retrieval, sleep), active forgetting
+
+For the full design rationale, see [design/agent-memory-v5-design.md](design/agent-memory-v5-design.md).
 
 ## License
 
-MIT
+Apache-2.0 — see [LICENSE](LICENSE).
