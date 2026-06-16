@@ -125,10 +125,31 @@ func (s *Server) execSearchConcepts(args map[string]any) (string, error) {
 	return sb.String(), nil
 }
 
+// validatePath rejects obviously malicious paths at the MCP layer before
+// they reach the storage layer. Defense in depth — the store also validates.
+func validatePath(path string) error {
+	if path == "" {
+		return fmt.Errorf("path is required")
+	}
+	if strings.HasPrefix(path, "/") {
+		return fmt.Errorf("path must be relative, not absolute")
+	}
+	if strings.Contains(path, "..") {
+		return fmt.Errorf("path traversal not allowed")
+	}
+	if strings.HasPrefix(path, ".meta/") {
+		return fmt.Errorf("cannot access metadata directly")
+	}
+	return nil
+}
+
 func (s *Server) execReadConcept(args map[string]any) (string, error) {
 	path, ok := args["path"].(string)
 	if !ok || path == "" {
 		return "", fmt.Errorf("path is required")
+	}
+	if err := validatePath(path); err != nil {
+		return "", err
 	}
 
 	page, err := s.store.ReadWikiPage(path)

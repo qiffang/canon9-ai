@@ -4,7 +4,7 @@
 // stdin and writes responses to stdout. This allows Claude, Codex, Pi, and
 // other MCP-compatible clients to consume engram9 knowledge bundles.
 //
-// Spec: https://modelcontextprotocol.io/specification/2025-03-26
+// Spec: https://modelcontextprotocol.io/specification/2024-11-05
 package mcp
 
 import (

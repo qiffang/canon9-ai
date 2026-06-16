@@ -304,6 +304,39 @@ func TestReadConcept_PathTraversal(t *testing.T) {
 	if !result.IsError {
 		t.Error("expected isError=true for path traversal")
 	}
+	if !strings.Contains(result.Content[0].Text, "traversal") {
+		t.Errorf("expected traversal error message, got %q", result.Content[0].Text)
+	}
+}
+
+func TestReadConcept_AbsolutePath(t *testing.T) {
+	s := setupServer(t)
+	resp := call(t, s, "tools/call", 1, map[string]any{
+		"name":      "read_concept",
+		"arguments": map[string]any{"path": "/etc/passwd"},
+	})
+	data, _ := json.Marshal(resp.Result)
+	var result toolsCallResult
+	json.Unmarshal(data, &result)
+
+	if !result.IsError {
+		t.Error("expected isError=true for absolute path")
+	}
+}
+
+func TestReadConcept_MetaAccess(t *testing.T) {
+	s := setupServer(t)
+	resp := call(t, s, "tools/call", 1, map[string]any{
+		"name":      "read_concept",
+		"arguments": map[string]any{"path": ".meta/semantic/test.json"},
+	})
+	data, _ := json.Marshal(resp.Result)
+	var result toolsCallResult
+	json.Unmarshal(data, &result)
+
+	if !result.IsError {
+		t.Error("expected isError=true for .meta access")
+	}
 }
 
 func TestNeighbors_Empty(t *testing.T) {
