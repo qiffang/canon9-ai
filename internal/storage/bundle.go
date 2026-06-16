@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -142,23 +141,3 @@ func (b *BundleFS) GetMemoryStats() (*MemoryStats, error) {
 	return &MemoryStats{WikiPageCount: pageCount}, nil
 }
 
-// extractBundleDescription reads the first non-header, non-empty, non-comment line.
-func extractBundleDescription(path string) string {
-	file, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer file.Close()
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "---") || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "<!--") {
-			continue
-		}
-		if len(line) > 100 {
-			return line[:100] + "..."
-		}
-		return line
-	}
-	return ""
-}
