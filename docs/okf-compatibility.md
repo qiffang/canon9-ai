@@ -139,5 +139,5 @@ knowledge-bundle/
 ## Compatibility guarantees
 
 1. Any OKF consumer can read engram9 wiki pages — unknown engram9 fields are ignored per spec.
-2. Engram9 can import any OKF bundle — missing engram9 profile fields are populated with defaults during compile.
+2. (Planned) Engram9 will import any OKF bundle — missing engram9 profile fields will be populated with defaults during compile.
 3. (Planned) `engram9 validate --strict` will enforce the full engram9 profile; `engram9 validate` will enforce OKF hard requirements + engram9 required fields.
