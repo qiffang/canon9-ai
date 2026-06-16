@@ -21,7 +21,7 @@ Engram9 defines a profile on top of OKF with additional fields for memory lifecy
 ```yaml
 ---
 # OKF required
-type: concept              # concept | procedure | decision | person | project | event
+type: concept              # concept | procedure | decision | person | project | event | index
 
 # Engram9 profile required
 title: "Human-readable title"
