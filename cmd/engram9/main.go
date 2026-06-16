@@ -11,14 +11,23 @@ import (
 
 	"github.com/qiffang/engram9/internal/agent"
 	"github.com/qiffang/engram9/internal/api"
+	"github.com/qiffang/engram9/internal/okf"
 )
 
 func main() {
-	addr := flag.String("addr", ":9090", "listen address")
-	dataDir := flag.String("data", "./data", "data directory")
-	model := flag.String("model", "", "LLM model name")
-	compileInterval := flag.Duration("compile-interval", 30*time.Minute, "auto-compile interval (0 to disable)")
-	flag.Parse()
+	if len(os.Args) > 1 && os.Args[1] == "validate" {
+		os.Exit(runValidate(os.Args[2:]))
+	}
+	runServe(os.Args[1:])
+}
+
+func runServe(args []string) {
+	flags := flag.NewFlagSet("engram9", flag.ExitOnError)
+	addr := flags.String("addr", ":9090", "listen address")
+	dataDir := flags.String("data", "./data", "data directory")
+	model := flags.String("model", "", "LLM model name")
+	compileInterval := flags.Duration("compile-interval", 30*time.Minute, "auto-compile interval (0 to disable)")
+	_ = flags.Parse(args)
 
 	var llm agent.LLM
 	switch os.Getenv("LLM_PROVIDER") {
@@ -50,4 +59,39 @@ func main() {
 	if err := http.ListenAndServe(*addr, handler.Routes()); err != nil {
 		log.Fatalf("serve: %v", err)
 	}
+}
+
+func runValidate(args []string) int {
+	flags := flag.NewFlagSet("engram9 validate", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	strict := flags.Bool("strict", false, "treat warnings as validation failure")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: engram9 validate [--strict] <bundle-dir>")
+		return 2
+	}
+
+	result, err := okf.ValidateBundle(flags.Arg(0), *strict)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "validate: %v\n", err)
+		return 2
+	}
+	for _, issue := range result.Issues {
+		fmt.Fprintf(os.Stderr, "%s %s: %s\n", issue.Severity, issue.Path, issue.Message)
+	}
+
+	errors := result.ErrorCount()
+	warnings := result.WarningCount()
+	if errors > 0 || (*strict && warnings > 0) {
+		if *strict && warnings > 0 {
+			fmt.Fprintf(os.Stderr, "OKF validation failed: %d file(s), %d error(s), %d warning(s); strict mode treats warnings as failure\n", result.FilesChecked, errors, warnings)
+		} else {
+			fmt.Fprintf(os.Stderr, "OKF validation failed: %d file(s), %d error(s), %d warning(s)\n", result.FilesChecked, errors, warnings)
+		}
+		return 1
+	}
+	fmt.Fprintf(os.Stdout, "OKF validation passed: %d file(s), %d warning(s)\n", result.FilesChecked, warnings)
+	return 0
 }

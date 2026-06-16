@@ -21,7 +21,7 @@ Engram9 defines a profile on top of OKF with additional fields for memory lifecy
 ```yaml
 ---
 # OKF required
-type: concept              # concept | procedure | decision | person | project | event
+type: concept              # concept | procedure | decision | person | project | event | index
 
 # Engram9 profile required
 title: "Human-readable title"
@@ -44,7 +44,7 @@ contradicts: []                       # Paths of pages with conflicting informat
 
 | Field | Level | Type | Description |
 |---|---|---|---|
-| `type` | OKF required | string | Page type. Values: `concept`, `procedure`, `decision`, `person`, `project`, `event` |
+| `type` | OKF required | string | Page type. Recognized values: `concept`, `procedure`, `decision`, `person`, `project`, `event`, `index` |
 | `title` | Engram9 required | string | Human-readable page title |
 | `description` | Engram9 required | string | One-line summary used by the query agent for index routing |
 | `timestamp` | Engram9 required | string (ISO 8601) | When this page was last compiled/updated |
@@ -65,6 +65,7 @@ contradicts: []                       # Paths of pages with conflicting informat
 | `person` | A person profile | "Alice — backend engineer" |
 | `project` | A project or component description | "Drive9 FUSE mount" |
 | `event` | A specific occurrence with context | "PR #565 review — found force-due race" |
+| `index` | A routing table for a knowledge bundle or sub-bundle | "engram9 Knowledge Index" |
 
 ## Link format
 
@@ -89,17 +90,17 @@ See [[semantic/commit-queue.md]] for details.
 See [Commit Queue](../semantic/commit-queue.md) for details.
 ```
 
-## Validation rules (planned)
+## Validation rules
 
-> **Note**: The `engram9 validate` subcommand is not yet implemented. This section defines the validation contract for the planned validator.
-
-The validator will check a knowledge bundle against this profile:
+The `engram9 validate` subcommand checks a knowledge bundle against this profile:
 
 ### Errors (hard fail)
 
 - Missing `type` field (OKF violation)
 - Invalid `timestamp` format (not ISO 8601)
 - Invalid `memory_type` value (not in allowed set)
+- Invalid `trust_tier` value when present (not `T1`, `T2`, or `T3`)
+- Invalid `confidence` value when present (not `high`, `medium`, or `low`)
 
 Note: unknown `type` values are **not** a hard error — OKF does not restrict `type` to a closed set. Engram9 recognizes the values listed above; unknown types are accepted but produce a warning in `--strict` mode.
 
@@ -108,10 +109,12 @@ Note: unknown `type` values are **not** a hard error — OKF does not restrict `
 - Missing engram9 profile required fields (`title`, `description`, `timestamp`, `memory_type`)
 - Broken internal links (target file does not exist)
 - Missing `source_events` (no provenance)
+- Missing `trust_tier` (no source trust tier)
 
 ### Tolerated (per OKF spec)
 
 - Unknown frontmatter fields from other profiles
+- Structural `index.md` files without frontmatter (links are still checked)
 - Missing optional fields (`confidence`, `supersedes`, `contradicts`)
 - External links (not validated)
 
@@ -140,4 +143,4 @@ knowledge-bundle/
 
 1. (Target) Any OKF consumer will be able to read engram9 wiki pages — unknown engram9 fields are ignored per spec.
 2. (Planned) Engram9 will import any OKF bundle — missing engram9 profile fields will be populated with defaults during compile.
-3. (Planned) `engram9 validate --strict` will enforce the full engram9 profile; `engram9 validate` will enforce OKF hard requirements + engram9 required fields.
+3. `engram9 validate --strict` enforces the full engram9 profile by treating warnings as validation failure; `engram9 validate` reports warnings but exits successfully when there are no hard errors.

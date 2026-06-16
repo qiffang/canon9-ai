@@ -119,6 +119,10 @@ ANTHROPIC_API_KEY=sk-xxx ./engram9 -addr :9090 -data ./data
 # Run with any OpenAI-compatible API
 LLM_PROVIDER=openai OPENAI_API_KEY=xxx OPENAI_BASE_URL=https://your-api/v1 \
   ./engram9 -addr :9090 -data ./data -model your-model
+
+# Validate an OKF bundle
+./engram9 validate examples/repo-memory
+./engram9 validate --strict examples/repo-memory
 ```
 
 ## API
