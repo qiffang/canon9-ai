@@ -47,7 +47,7 @@ Raw events (conversations, tool output, docs)
 
 ## OKF compatibility
 
-Every wiki page is an OKF-compatible Markdown file with YAML frontmatter:
+Wiki pages follow the OKF schema — each page is a Markdown file with YAML frontmatter:
 
 ```markdown
 ---
@@ -85,7 +85,7 @@ OKF consumers that don't understand engram9 profile fields will ignore them grac
 
 ### Links
 
-Canonical output uses standard Markdown links:
+Target output uses standard Markdown links:
 
 ```markdown
 Related: [Alice](../semantic/people/alice.md)

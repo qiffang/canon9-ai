@@ -1,6 +1,6 @@
 # OKF Compatibility
 
-This document describes how engram9 knowledge pages map to the [Open Knowledge Format (OKF)](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) spec.
+This document describes how engram9 knowledge pages will map to the [Open Knowledge Format (OKF)](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) spec. The schema below is the target profile; the runtime is being migrated from a legacy format (HTML-comment metadata, `[[wikilinks]]`) to OKF-compatible YAML frontmatter.
 
 ## OKF overview
 
@@ -68,7 +68,7 @@ contradicts: []                       # Paths of pages with conflicting informat
 
 ## Link format
 
-### Canonical (new output)
+### Canonical (target output)
 
 Standard Markdown links with relative paths:
 
@@ -138,6 +138,6 @@ knowledge-bundle/
 
 ## Compatibility guarantees
 
-1. Any OKF consumer can read engram9 wiki pages — unknown engram9 fields are ignored per spec.
+1. (Target) Any OKF consumer will be able to read engram9 wiki pages — unknown engram9 fields are ignored per spec.
 2. (Planned) Engram9 will import any OKF bundle — missing engram9 profile fields will be populated with defaults during compile.
 3. (Planned) `engram9 validate --strict` will enforce the full engram9 profile; `engram9 validate` will enforce OKF hard requirements + engram9 required fields.
