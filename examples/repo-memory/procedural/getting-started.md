@@ -43,14 +43,4 @@ curl -X POST http://localhost:9090/recall \
 curl -X POST http://localhost:9090/compile -d '{}'
 ```
 
-## Validate a knowledge bundle
-
-```bash
-# Basic validation (OKF required + engram9 profile required)
-engram9 validate ./wiki/
-
-# Strict validation (all warnings become errors)
-engram9 validate --strict ./wiki/
-```
-
 Related: [Three-Timing Consolidation](../semantic/three-timing-consolidation.md)

@@ -89,7 +89,7 @@ Canonical output uses standard Markdown links:
 Related: [Alice](../semantic/people/alice.md)
 ```
 
-Legacy `[[wikilink]]` syntax is supported for import/migration but is not used in new output.
+Legacy `[[wikilink]]` syntax is planned for import/migration support (not yet implemented) and will not be used in new output.
 
 ## Wiki structure
 
