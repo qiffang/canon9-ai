@@ -125,6 +125,7 @@ func (b *BundleFS) GetCompileCursor() uint64 { return 0 }
 
 func (b *BundleFS) GetMemoryStats() (*MemoryStats, error) {
 	pageCount := 0
+	archiveCount := 0
 	_ = filepath.Walk(b.bundleDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".md") {
 			return nil
@@ -133,11 +134,12 @@ func (b *BundleFS) GetMemoryStats() (*MemoryStats, error) {
 		if relPath == "index.md" {
 			return nil
 		}
-		if !strings.HasPrefix(relPath, "archive/") {
+		if strings.HasPrefix(relPath, "archive/") {
+			archiveCount++
+		} else {
 			pageCount++
 		}
 		return nil
 	})
-	return &MemoryStats{WikiPageCount: pageCount}, nil
+	return &MemoryStats{WikiPageCount: pageCount, ArchivedPageCount: archiveCount}, nil
 }
-
