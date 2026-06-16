@@ -21,7 +21,7 @@ Engram9 defines a profile on top of OKF with additional fields for memory lifecy
 ```yaml
 ---
 # OKF required
-type: concept              # concept | procedure | decision | person | project | event | index
+type: concept              # concept | procedure | decision | person | project | event
 
 # Engram9 profile required
 title: "Human-readable title"
@@ -44,7 +44,7 @@ contradicts: []                       # Paths of pages with conflicting informat
 
 | Field | Level | Type | Description |
 |---|---|---|---|
-| `type` | OKF required | string | Page type. Recognized values: `concept`, `procedure`, `decision`, `person`, `project`, `event`, `index` |
+| `type` | OKF required | string | Page type. Recognized values: `concept`, `procedure`, `decision`, `person`, `project`, `event` |
 | `title` | Engram9 required | string | Human-readable page title |
 | `description` | Engram9 required | string | One-line summary used by the query agent for index routing |
 | `timestamp` | Engram9 required | string (ISO 8601) | When this page was last compiled/updated |
@@ -65,7 +65,6 @@ contradicts: []                       # Paths of pages with conflicting informat
 | `person` | A person profile | "Alice — backend engineer" |
 | `project` | A project or component description | "Drive9 FUSE mount" |
 | `event` | A specific occurrence with context | "PR #565 review — found force-due race" |
-| `index` | A routing table for a knowledge bundle or sub-bundle | "engram9 Knowledge Index" |
 
 ## Link format
 
