@@ -6,7 +6,7 @@ engram9 turns raw conversations, repos, docs, and tool traces into git-native kn
 
 Knowledge bundles are plain Markdown files with YAML frontmatter, following the [Open Knowledge Format (OKF)](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) spec. They live in your repo, can be `git diff`'d, reviewed in PRs, and consumed by any OKF-compatible tool.
 
-> **Status**: The runtime is being migrated from a legacy wiki format (HTML-comment metadata, `[[wikilinks]]`) to OKF-compatible YAML frontmatter output. The schema, examples, and API described below reflect the target architecture. See [docs/okf-compatibility.md](docs/okf-compatibility.md) for the full OKF profile specification and which features are planned vs implemented.
+> **Status**: The runtime is being migrated from a legacy wiki format (HTML-comment metadata, `[[wikilinks]]`) to OKF-compatible YAML frontmatter output. `engram9 validate` checks OKF bundles, and `engram9 migrate-okf` converts existing legacy Markdown pages. See [docs/okf-compatibility.md](docs/okf-compatibility.md) for the full OKF profile specification and compatibility notes.
 
 ## Why engram9?
 
@@ -91,7 +91,7 @@ Target output uses standard Markdown links:
 Related: [Alice](../semantic/people/alice.md)
 ```
 
-Legacy `[[wikilink]]` syntax is planned for import/migration support (not yet implemented) and will not be used in new output.
+Legacy `[[wikilink]]` syntax is supported by `engram9 migrate-okf`, which converts it to standard Markdown links. New output should use standard Markdown links directly.
 
 ## Wiki structure
 
@@ -123,6 +123,10 @@ LLM_PROVIDER=openai OPENAI_API_KEY=xxx OPENAI_BASE_URL=https://your-api/v1 \
 # Validate an OKF bundle
 ./engram9 validate examples/repo-memory
 ./engram9 validate --strict examples/repo-memory
+
+# Migrate legacy HTML-comment metadata and [[wikilinks]]
+./engram9 migrate-okf ./data/wiki
+./engram9 migrate-okf --write ./data/wiki
 ```
 
 ## API

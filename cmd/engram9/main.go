@@ -15,8 +15,13 @@ import (
 )
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "validate" {
-		os.Exit(runValidate(os.Args[2:]))
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "validate":
+			os.Exit(runValidate(os.Args[2:]))
+		case "migrate-okf":
+			os.Exit(runMigrateOKF(os.Args[2:]))
+		}
 	}
 	runServe(os.Args[1:])
 }
@@ -93,5 +98,46 @@ func runValidate(args []string) int {
 		return 1
 	}
 	fmt.Fprintf(os.Stdout, "OKF validation passed: %d file(s), %d warning(s)\n", result.FilesChecked, warnings)
+	return 0
+}
+
+func runMigrateOKF(args []string) int {
+	flags := flag.NewFlagSet("engram9 migrate-okf", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	write := flags.Bool("write", false, "rewrite files in place")
+	check := flags.Bool("check", false, "exit 1 if migration would change files")
+	backup := flags.Bool("backup", true, "create .bak files before rewriting when --write is set")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: engram9 migrate-okf [--write] [--check] [--backup=false] <bundle-dir>")
+		return 2
+	}
+	if *write && *check {
+		fmt.Fprintln(os.Stderr, "migrate-okf: --write and --check cannot be used together")
+		return 2
+	}
+
+	result, err := okf.MigrateLegacyBundle(flags.Arg(0), okf.MigrationOptions{Write: *write, Backup: *backup})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "migrate-okf: %v\n", err)
+		return 2
+	}
+	for _, change := range result.Changes {
+		if *write {
+			fmt.Fprintf(os.Stdout, "migrated %s\n", change.Path)
+		} else {
+			fmt.Fprintf(os.Stdout, "would migrate %s\n", change.Path)
+		}
+	}
+	if *write {
+		fmt.Fprintf(os.Stdout, "OKF migration wrote: %d file(s), %d change(s)\n", result.FilesChecked, result.ChangedCount())
+	} else {
+		fmt.Fprintf(os.Stdout, "OKF migration dry-run: %d file(s), %d change(s)\n", result.FilesChecked, result.ChangedCount())
+	}
+	if *check && result.ChangedCount() > 0 {
+		return 1
+	}
 	return 0
 }
