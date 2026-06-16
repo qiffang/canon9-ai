@@ -165,7 +165,7 @@ func MigrateLegacyMarkdown(root, rel, content string, modTime, now time.Time) (s
 		return convertedBody, changed, nil
 	}
 
-	fields := frontmatterFromLegacy(rel, legacy, stripped, modTime, now)
+	fields := frontmatterFromLegacy(rel, legacy, convertedBody, modTime, now)
 	migrated := renderFrontmatter(fields) + "\n" + strings.TrimLeft(convertedBody, "\n")
 	return migrated, migrated != content, nil
 }
@@ -528,7 +528,30 @@ func markdownHrefForWikiTarget(root, rel, target string) string {
 	if href == "." {
 		href = filepath.Base(pathPart)
 	}
-	return href + suffix
+	return escapeMarkdownDestination(href + suffix)
+}
+
+func escapeMarkdownDestination(href string) string {
+	var b strings.Builder
+	for _, r := range href {
+		switch r {
+		case ' ':
+			b.WriteString("%20")
+		case '(':
+			b.WriteString("%28")
+		case ')':
+			b.WriteString("%29")
+		case '<':
+			b.WriteString("%3C")
+		case '>':
+			b.WriteString("%3E")
+		case '\\':
+			b.WriteString("%5C")
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func splitLinkSuffix(target string) (string, string) {

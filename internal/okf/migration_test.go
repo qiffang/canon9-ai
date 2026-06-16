@@ -115,6 +115,33 @@ See [[procedural/run-benchmark]].
 	}
 }
 
+func TestMigrateLegacyMarkdownEscapesSpaceDestinations(t *testing.T) {
+	root := t.TempDir()
+	input := "<!-- compiled_from: evt_001 -->\n# Source\n\nSee [[semantic/Project Alpha]].\n"
+	got, changed, err := MigrateLegacyMarkdown(root, "semantic/source.md", input, time.Date(2026, 6, 16, 12, 0, 0, 0, time.UTC), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("expected migration change")
+	}
+	if !strings.Contains(got, "[Project Alpha](Project%20Alpha.md)") {
+		t.Fatalf("space destination should be percent-escaped:\n%s", got)
+	}
+	if strings.Contains(got, "[[semantic/Project Alpha]]") {
+		t.Fatalf("legacy wikilink should not remain in migrated output:\n%s", got)
+	}
+	writeFile(t, root, "semantic/source.md", got)
+	writeFile(t, root, "semantic/Project Alpha.md", validOKFPage("concept", "Project Alpha", "semantic"))
+	result, err := ValidateBundle(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Issues) != 0 {
+		t.Fatalf("escaped migrated link should validate strictly: %#v", result.Issues)
+	}
+}
+
 func TestMigrateLegacyBundleDryRunWriteBackupAndCheck(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "semantic/a.md", "<!-- compiled_from: evt_001 -->\n# A\n\nSee [[procedural/b]].\n")

@@ -305,6 +305,7 @@ func validateLinks(root, pageDir, rel string, body string) []Issue {
 		}
 		link = strings.Split(link, "#")[0]
 		link = strings.Split(link, "?")[0]
+		link = decodeMarkdownDestinationPath(link)
 		if link == "" {
 			continue
 		}
@@ -397,6 +398,16 @@ func stripInlineCode(line string) string {
 		i = runEnd + closeOffset + len(delimiter)
 	}
 	return b.String()
+}
+
+func decodeMarkdownDestinationPath(link string) string {
+	link = strings.ReplaceAll(link, "%20", " ")
+	link = strings.ReplaceAll(link, "%28", "(")
+	link = strings.ReplaceAll(link, "%29", ")")
+	link = strings.ReplaceAll(link, "%3C", "<")
+	link = strings.ReplaceAll(link, "%3E", ">")
+	link = strings.ReplaceAll(link, "%5C", "\\")
+	return link
 }
 
 func isExternalLink(link string) bool {
