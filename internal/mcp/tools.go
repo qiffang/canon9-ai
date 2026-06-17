@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -54,7 +55,7 @@ var MCPTools = []mcpTool{
 	},
 	{
 		Name:        "write_memory",
-		Description: "Store new information into the memory system. The information is appended as a raw event and will be integrated into wiki pages by the ingest agent. Returns the event ID for tracking.",
+		Description: "Store new information into the memory system. The information is appended as a raw event. Call dream to consolidate pending events into wiki pages when the dream tool is available.",
 		InputSchema: mustJSON(map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -84,8 +85,26 @@ var MCPTools = []mcpTool{
 	},
 }
 
+var dreamTool = mcpTool{
+	Name:        "dream",
+	Description: "Run a memory dreaming cycle now: consolidate pending raw events into wiki pages, prune/archive where appropriate, and rebuild the wiki index. Available only in runtime data mode when -dream is enabled.",
+	InputSchema: mustJSON(map[string]any{
+		"type":       "object",
+		"properties": map[string]any{},
+	}),
+}
+
+func (s *Server) tools() []mcpTool {
+	tools := make([]mcpTool, 0, len(MCPTools)+1)
+	tools = append(tools, MCPTools...)
+	if s.dreamer != nil {
+		tools = append(tools, dreamTool)
+	}
+	return tools
+}
+
 // executeTool dispatches an MCP tool call to the storage layer.
-func (s *Server) executeTool(name string, args map[string]any) (string, error) {
+func (s *Server) executeTool(ctx context.Context, name string, args map[string]any) (string, error) {
 	switch name {
 	case "search_concepts":
 		return s.execSearchConcepts(args)
@@ -97,6 +116,8 @@ func (s *Server) executeTool(name string, args map[string]any) (string, error) {
 		return s.execWriteMemory(args)
 	case "memory_status":
 		return s.execMemoryStatus()
+	case "dream":
+		return s.execDream(ctx)
 	default:
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
@@ -221,7 +242,10 @@ func (s *Server) execWriteMemory(args map[string]any) (string, error) {
 		return "", fmt.Errorf("append event: %w", err)
 	}
 
-	return fmt.Sprintf("Stored as %s. Will be integrated into wiki pages on next compile cycle.", eventID), nil
+	if s.dreamer != nil {
+		return fmt.Sprintf("Stored as %s. Pending integration into wiki pages; call dream to consolidate now.", eventID), nil
+	}
+	return fmt.Sprintf("Stored as %s. Pending integration into wiki pages; run the HTTP server auto-dreaming flow or start engram9-mcp with -dream and call dream.", eventID), nil
 }
 
 func (s *Server) execMemoryStatus() (string, error) {
@@ -230,7 +254,31 @@ func (s *Server) execMemoryStatus() (string, error) {
 		return "", fmt.Errorf("get stats: %w", err)
 	}
 
-	data, _ := json.MarshalIndent(stats, "", "  ")
+	if s.dreamer == nil {
+		data, _ := json.MarshalIndent(stats, "", "  ")
+		return string(data), nil
+	}
+
+	data, _ := json.Marshal(stats)
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return "", fmt.Errorf("marshal stats: %w", err)
+	}
+	payload["dream"] = s.dreamer.Status()
+
+	data, _ = json.MarshalIndent(payload, "", "  ")
+	return string(data), nil
+}
+
+func (s *Server) execDream(ctx context.Context) (string, error) {
+	if s.dreamer == nil {
+		return "", fmt.Errorf("dream is unavailable; start engram9-mcp in runtime data mode with -dream")
+	}
+	result, err := s.dreamer.Dream(ctx)
+	if err != nil {
+		return "", err
+	}
+	data, _ := json.MarshalIndent(result, "", "  ")
 	return string(data), nil
 }
 

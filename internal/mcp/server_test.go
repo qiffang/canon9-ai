@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/qiffang/engram9/internal/dream"
 	"github.com/qiffang/engram9/internal/storage"
 )
 
@@ -65,6 +67,31 @@ func setupServer(t *testing.T) *Server {
 	return NewServer(store)
 }
 
+type fakeDreamer struct {
+	calls  int
+	result dream.Result
+	status dream.Status
+	err    error
+}
+
+func (f *fakeDreamer) Dream(context.Context) (dream.Result, error) {
+	f.calls++
+	return f.result, f.err
+}
+
+func (f *fakeDreamer) Status() dream.Status {
+	return f.status
+}
+
+type staticCompiler struct {
+	summary   string
+	newCursor uint64
+}
+
+func (c *staticCompiler) Compile(context.Context, uint64) (string, uint64, error) {
+	return c.summary, c.newCursor, nil
+}
+
 func TestInitialize(t *testing.T) {
 	s := setupServer(t)
 	resp := call(t, s, "initialize", 1, map[string]any{
@@ -116,6 +143,36 @@ func TestToolsList(t *testing.T) {
 		if !names[name] {
 			t.Errorf("missing tool: %s", name)
 		}
+	}
+}
+
+func TestToolsList_WithDreamer(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.NewFS(dir)
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	s := NewServer(store, WithDreamer(&fakeDreamer{}))
+
+	resp := call(t, s, "tools/list", 1, nil)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+
+	data, _ := json.Marshal(resp.Result)
+	var result toolsListResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	found := false
+	for _, tool := range result.Tools {
+		if tool.Name == "dream" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected dream tool when dreamer is configured")
 	}
 }
 
@@ -450,6 +507,30 @@ func TestWriteMemory(t *testing.T) {
 	}
 }
 
+func TestWriteMemory_WithDreamerHintsDreamTool(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.NewFS(dir)
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	s := NewServer(store, WithDreamer(&fakeDreamer{}))
+
+	resp := call(t, s, "tools/call", 1, map[string]any{
+		"name":      "write_memory",
+		"arguments": map[string]any{"text": "Bob switched to Neovim"},
+	})
+	data, _ := json.Marshal(resp.Result)
+	var result toolsCallResult
+	json.Unmarshal(data, &result)
+
+	if result.IsError {
+		t.Fatalf("write error: %s", result.Content[0].Text)
+	}
+	if !strings.Contains(result.Content[0].Text, "call dream") {
+		t.Fatalf("expected dream hint, got %q", result.Content[0].Text)
+	}
+}
+
 func TestWriteMemory_DefaultActorSource(t *testing.T) {
 	dir := t.TempDir()
 	store, err := storage.NewFS(dir)
@@ -525,6 +606,168 @@ func TestMemoryStatus(t *testing.T) {
 	}
 	if stats.WikiPageCount != 1 {
 		t.Errorf("wiki_page_count = %d, want 1", stats.WikiPageCount)
+	}
+}
+
+func TestMemoryStatus_WithDreamerIncludesDreamStatus(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.NewFS(dir)
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	dreamer := &fakeDreamer{status: dream.Status{
+		LastStartCursor:     1,
+		LastNewCursor:       3,
+		LastProcessedEvents: 2,
+		LastFinishedAt:      "2026-06-17T03:00:01Z",
+	}}
+	s := NewServer(store, WithDreamer(dreamer))
+
+	resp := call(t, s, "tools/call", 1, map[string]any{
+		"name":      "memory_status",
+		"arguments": map[string]any{},
+	})
+	data, _ := json.Marshal(resp.Result)
+	var result toolsCallResult
+	json.Unmarshal(data, &result)
+
+	if result.IsError {
+		t.Fatalf("error: %s", result.Content[0].Text)
+	}
+
+	var payload struct {
+		EventCount int `json:"event_count"`
+		Dream      struct {
+			LastStartCursor     uint64 `json:"last_start_cursor"`
+			LastNewCursor       uint64 `json:"last_new_cursor"`
+			LastProcessedEvents int    `json:"last_processed_events"`
+			LastFinishedAt      string `json:"last_finished_at"`
+		} `json:"dream"`
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.Dream.LastStartCursor != 1 || payload.Dream.LastNewCursor != 3 || payload.Dream.LastProcessedEvents != 2 {
+		t.Fatalf("unexpected dream status: %+v", payload.Dream)
+	}
+	if payload.Dream.LastFinishedAt == "" {
+		t.Fatal("expected last_finished_at")
+	}
+}
+
+func TestDreamTool(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.NewFS(dir)
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	dreamer := &fakeDreamer{result: dream.Result{
+		StartCursor:     0,
+		NewCursor:       2,
+		ProcessedEvents: 2,
+		Summary:         "compiled two events",
+	}}
+	s := NewServer(store, WithDreamer(dreamer))
+
+	resp := call(t, s, "tools/call", 1, map[string]any{
+		"name":      "dream",
+		"arguments": map[string]any{},
+	})
+	data, _ := json.Marshal(resp.Result)
+	var result toolsCallResult
+	json.Unmarshal(data, &result)
+
+	if result.IsError {
+		t.Fatalf("dream error: %s", result.Content[0].Text)
+	}
+	if dreamer.calls != 1 {
+		t.Fatalf("dream calls = %d, want 1", dreamer.calls)
+	}
+	if !strings.Contains(result.Content[0].Text, `"processed_events": 2`) {
+		t.Fatalf("expected processed_events in result, got %q", result.Content[0].Text)
+	}
+}
+
+func TestDreamTool_UnavailableWithoutDreamer(t *testing.T) {
+	s := setupServer(t)
+	resp := call(t, s, "tools/call", 1, map[string]any{
+		"name":      "dream",
+		"arguments": map[string]any{},
+	})
+	data, _ := json.Marshal(resp.Result)
+	var result toolsCallResult
+	json.Unmarshal(data, &result)
+
+	if !result.IsError {
+		t.Fatal("expected isError=true for dream without dreamer")
+	}
+	if !strings.Contains(result.Content[0].Text, "-dream") {
+		t.Fatalf("expected -dream hint, got %q", result.Content[0].Text)
+	}
+}
+
+func TestWriteDreamStatusFlow(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.NewFS(dir)
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	dreamer := dream.NewRunner(store, &staticCompiler{
+		summary:   "compiled pending memory",
+		newCursor: 1,
+	})
+	s := NewServer(store, WithDreamer(dreamer))
+
+	writeResp := call(t, s, "tools/call", 1, map[string]any{
+		"name":      "write_memory",
+		"arguments": map[string]any{"text": "Alice prefers dark mode"},
+	})
+	writeData, _ := json.Marshal(writeResp.Result)
+	var writeResult toolsCallResult
+	json.Unmarshal(writeData, &writeResult)
+	if writeResult.IsError {
+		t.Fatalf("write error: %s", writeResult.Content[0].Text)
+	}
+
+	dreamResp := call(t, s, "tools/call", 2, map[string]any{
+		"name":      "dream",
+		"arguments": map[string]any{},
+	})
+	dreamData, _ := json.Marshal(dreamResp.Result)
+	var dreamResult toolsCallResult
+	json.Unmarshal(dreamData, &dreamResult)
+	if dreamResult.IsError {
+		t.Fatalf("dream error: %s", dreamResult.Content[0].Text)
+	}
+
+	statusResp := call(t, s, "tools/call", 3, map[string]any{
+		"name":      "memory_status",
+		"arguments": map[string]any{},
+	})
+	statusData, _ := json.Marshal(statusResp.Result)
+	var statusResult toolsCallResult
+	json.Unmarshal(statusData, &statusResult)
+	if statusResult.IsError {
+		t.Fatalf("status error: %s", statusResult.Content[0].Text)
+	}
+
+	var payload struct {
+		EventCount      int `json:"event_count"`
+		UncompiledCount int `json:"uncompiled_count"`
+		Dream           struct {
+			LastNewCursor       uint64 `json:"last_new_cursor"`
+			LastProcessedEvents int    `json:"last_processed_events"`
+			LastSummary         string `json:"last_summary"`
+		} `json:"dream"`
+	}
+	if err := json.Unmarshal([]byte(statusResult.Content[0].Text), &payload); err != nil {
+		t.Fatalf("unmarshal status: %v", err)
+	}
+	if payload.EventCount != 1 || payload.UncompiledCount != 0 {
+		t.Fatalf("unexpected memory counts: %+v", payload)
+	}
+	if payload.Dream.LastNewCursor != 1 || payload.Dream.LastProcessedEvents != 1 || payload.Dream.LastSummary != "compiled pending memory" {
+		t.Fatalf("unexpected dream status: %+v", payload.Dream)
 	}
 }
 

@@ -9,12 +9,14 @@ package mcp
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"strings"
 
+	"github.com/qiffang/engram9/internal/dream"
 	"github.com/qiffang/engram9/internal/storage"
 )
 
@@ -23,12 +25,30 @@ const ProtocolVersion = "2024-11-05"
 
 // Server handles MCP JSON-RPC requests over stdio.
 type Server struct {
-	store storage.Store
+	store   storage.Store
+	dreamer Dreamer
+}
+
+type Dreamer interface {
+	Dream(context.Context) (dream.Result, error)
+	Status() dream.Status
+}
+
+type Option func(*Server)
+
+func WithDreamer(dreamer Dreamer) Option {
+	return func(s *Server) {
+		s.dreamer = dreamer
+	}
 }
 
 // NewServer creates an MCP server backed by the given store.
-func NewServer(store storage.Store) *Server {
-	return &Server{store: store}
+func NewServer(store storage.Store, opts ...Option) *Server {
+	s := &Server{store: store}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // --- JSON-RPC types ---
@@ -220,7 +240,7 @@ func (s *Server) handleToolsList(req jsonRPCRequest) *jsonRPCResponse {
 	return &jsonRPCResponse{
 		JSONRPC: "2.0",
 		ID:      req.ID,
-		Result:  toolsListResult{Tools: MCPTools},
+		Result:  toolsListResult{Tools: s.tools()},
 	}
 }
 
@@ -234,7 +254,7 @@ func (s *Server) handleToolsCall(req jsonRPCRequest) *jsonRPCResponse {
 		}
 	}
 
-	result, err := s.executeTool(params.Name, params.Arguments)
+	result, err := s.executeTool(context.Background(), params.Name, params.Arguments)
 	if err != nil {
 		return &jsonRPCResponse{
 			JSONRPC: "2.0",

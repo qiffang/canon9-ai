@@ -272,6 +272,11 @@ Archived pages are moved to `archive/`, removed from `index.md`, but remain sear
 | `rebuild_index()` | compile | Full rescan of active pages → regenerate index.md |
 | `get_memory_stats()` | status | Event counts, page counts, pending integrations |
 
+The HTTP runtime starts periodic dreaming by default (`-compile-interval 30m`).
+The MCP runtime keeps read/write startup lightweight by default;
+`engram9-mcp -data <dir> -dream` exposes an explicit `dream` tool that runs the
+same compile agent and advances the compile cursor.
+
 ### Agent tool permissions
 
 | Agent | Tools | Read | Write |

@@ -137,6 +137,10 @@ LLM_PROVIDER=openai OPENAI_API_KEY=xxx OPENAI_BASE_URL=https://your-api/v1 \
 # Migrate legacy HTML-comment metadata and [[wikilinks]]
 ./engram9 migrate-okf ./data/wiki
 ./engram9 migrate-okf --write ./data/wiki
+
+# Serve runtime memory as MCP tools
+go build -o engram9-mcp ./cmd/engram9-mcp
+ANTHROPIC_API_KEY=sk-xxx ./engram9-mcp -data ./data -dream
 ```
 
 ## API
@@ -156,6 +160,31 @@ curl -X POST /compile -d '{}'
 # System status
 curl GET /status
 ```
+
+`/remember` writes the raw event immediately and starts asynchronous ingest.
+The HTTP server also runs automatic dreaming/consolidation every 30 minutes by
+default (`-compile-interval 30m`; set `-compile-interval 0` to disable).
+`/compile` is the manual "dream now" endpoint for immediate consolidation.
+
+## MCP
+
+`engram9-mcp` exposes memory to MCP-compatible agents over stdio.
+
+```bash
+# Read/write runtime data. write_memory appends raw events.
+./engram9-mcp -data ./data
+
+# Enable agent-triggered dreaming. Requires the same LLM env as the HTTP server.
+ANTHROPIC_API_KEY=sk-xxx ./engram9-mcp -data ./data -dream
+
+# Read-only OKF bundle mode.
+./engram9-mcp -bundle ./examples/repo-memory
+```
+
+Runtime tools: `search_concepts`, `read_concept`, `neighbors`,
+`write_memory`, `memory_status`; with `-dream`, the MCP server also exposes
+`dream`, which runs the same compile agent used by the HTTP `/compile` endpoint.
+Bundle mode is read-only and does not expose `dream`.
 
 ## Design
 
