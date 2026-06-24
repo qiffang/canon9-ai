@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,7 +29,15 @@ type Handler struct {
 
 	// wg tracks background goroutines for graceful shutdown / testing.
 	wg sync.WaitGroup
+
+	// ingestTimeout bounds async /remember wiki integration.
+	ingestTimeout time.Duration
 }
+
+const (
+	defaultIngestTimeout = 2 * time.Minute
+	ingestTimeoutEnv     = "ENGRAM9_INGEST_TIMEOUT"
+)
 
 // New creates a new API handler with all agents wired up.
 func New(dataDir string, llm agent.LLM) (*Handler, error) {
@@ -40,10 +49,11 @@ func New(dataDir string, llm agent.LLM) (*Handler, error) {
 	executor := agent.NewToolExecutor(store)
 
 	return &Handler{
-		store:   store,
-		ingest:  agent.NewIngestAgent(llm, executor),
-		query:   agent.NewQueryAgent(llm, executor),
-		compile: agent.NewCompileAgent(llm, executor),
+		store:         store,
+		ingest:        agent.NewIngestAgent(llm, executor),
+		query:         agent.NewQueryAgent(llm, executor),
+		compile:       agent.NewCompileAgent(llm, executor),
+		ingestTimeout: ingestTimeoutFromEnv(),
 	}, nil
 }
 
@@ -122,7 +132,7 @@ func (h *Handler) handleRemember(w http.ResponseWriter, r *http.Request) {
 		defer h.wg.Done()
 		defer h.pendingIntegrations.Add(-1)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), h.effectiveIngestTimeout())
 		defer cancel()
 
 		if err := h.ingest.Integrate(ctx, eventID, req.Text, req.Context); err != nil {
@@ -215,6 +225,27 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 // Wait blocks until all background integrations finish. Used for testing and graceful shutdown.
 func (h *Handler) Wait() { h.wg.Wait() }
+
+func (h *Handler) effectiveIngestTimeout() time.Duration {
+	if h.ingestTimeout > 0 {
+		return h.ingestTimeout
+	}
+	return defaultIngestTimeout
+}
+
+func ingestTimeoutFromEnv() time.Duration {
+	raw := os.Getenv(ingestTimeoutEnv)
+	if raw == "" {
+		return defaultIngestTimeout
+	}
+
+	timeout, err := time.ParseDuration(raw)
+	if err != nil || timeout <= 0 {
+		log.Printf("[api] invalid %s=%q, using default %s", ingestTimeoutEnv, raw, defaultIngestTimeout)
+		return defaultIngestTimeout
+	}
+	return timeout
+}
 
 // runCompile executes a single compile cycle. Safe for concurrent use (serialized by compileMu).
 func (h *Handler) runCompile(ctx context.Context) {
