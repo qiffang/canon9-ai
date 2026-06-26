@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -35,8 +36,10 @@ type Handler struct {
 }
 
 const (
-	defaultIngestTimeout = 2 * time.Minute
-	ingestTimeoutEnv     = "ENGRAM9_INGEST_TIMEOUT"
+	defaultIngestTimeout       = 2 * time.Minute
+	ingestTimeoutEnv           = "ENGRAM9_INGEST_TIMEOUT"
+	defaultCompileMaxToolLoops = 120
+	compileMaxToolLoopsEnv     = "ENGRAM9_COMPILE_MAX_TOOL_LOOPS"
 )
 
 // New creates a new API handler with all agents wired up.
@@ -52,7 +55,7 @@ func New(dataDir string, llm agent.LLM) (*Handler, error) {
 		store:         store,
 		ingest:        agent.NewIngestAgent(llm, executor),
 		query:         agent.NewQueryAgent(llm, executor),
-		compile:       agent.NewCompileAgent(llm, executor),
+		compile:       agent.NewCompileAgentWithMaxToolLoops(llm, executor, compileMaxToolLoopsFromEnv()),
 		ingestTimeout: ingestTimeoutFromEnv(),
 	}, nil
 }
@@ -245,6 +248,20 @@ func ingestTimeoutFromEnv() time.Duration {
 		return defaultIngestTimeout
 	}
 	return timeout
+}
+
+func compileMaxToolLoopsFromEnv() int {
+	raw := os.Getenv(compileMaxToolLoopsEnv)
+	if raw == "" {
+		return defaultCompileMaxToolLoops
+	}
+
+	loops, err := strconv.Atoi(raw)
+	if err != nil || loops <= 0 {
+		log.Printf("[api] invalid %s=%q, using default %d", compileMaxToolLoopsEnv, raw, defaultCompileMaxToolLoops)
+		return defaultCompileMaxToolLoops
+	}
+	return loops
 }
 
 // runCompile executes a single compile cycle. Safe for concurrent use (serialized by compileMu).

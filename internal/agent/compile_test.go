@@ -30,6 +30,61 @@ func (m *toolUseLLM) Call(_ context.Context, req LLMRequest) (*LLMResponse, erro
 	}, nil
 }
 
+type repeatedToolUseLLM struct {
+	toolRounds int
+	callCount  int
+}
+
+func (m *repeatedToolUseLLM) Call(_ context.Context, req LLMRequest) (*LLMResponse, error) {
+	m.callCount++
+	if m.callCount <= m.toolRounds {
+		return &LLMResponse{
+			Content: []ContentBlock{
+				{
+					Type:  "tool_use",
+					ID:    fmt.Sprintf("call_%d", m.callCount),
+					Name:  "read_events_since",
+					Input: json.RawMessage(`{"cursor": 0}`),
+				},
+			},
+			StopReason: "tool_use",
+		}, nil
+	}
+	return &LLMResponse{
+		Content:    []ContentBlock{{Type: "text", Text: "Compile done after many loops."}},
+		StopReason: "end_turn",
+	}, nil
+}
+
+func TestCompileAllowsConfiguredToolLoopBudget(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.NewFS(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = store.AppendEvent(storage.Event{
+		Content:    "event",
+		Durability: "long-term",
+		SourceType: "user",
+		TrustTier:  1,
+	})
+
+	executor := NewToolExecutor(store)
+	llm := &repeatedToolUseLLM{toolRounds: defaultMaxToolLoops + 1}
+	agent := NewCompileAgentWithMaxToolLoops(llm, executor, defaultMaxToolLoops+2)
+
+	result, newCursor, err := agent.Compile(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != "Compile done after many loops." {
+		t.Fatalf("unexpected result: %q", result)
+	}
+	if newCursor != 1 {
+		t.Fatalf("cursor=%d, want 1", newCursor)
+	}
+}
+
 func TestCompileCursorRejectsWrongInput(t *testing.T) {
 	// Setup: store with 5 events, compile cursor starts at 3.
 	dir := t.TempDir()

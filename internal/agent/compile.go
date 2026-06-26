@@ -90,8 +90,12 @@ type CompileAgent struct {
 }
 
 func NewCompileAgent(llm LLM, executor *ToolExecutor) *CompileAgent {
+	return NewCompileAgentWithMaxToolLoops(llm, executor, defaultMaxToolLoops)
+}
+
+func NewCompileAgentWithMaxToolLoops(llm LLM, executor *ToolExecutor, maxToolLoops int) *CompileAgent {
 	return &CompileAgent{
-		runner:   NewRunner(llm, executor),
+		runner:   NewRunnerWithMaxToolLoops(llm, executor, maxToolLoops),
 		executor: executor,
 	}
 }
