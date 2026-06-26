@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // FS implements Store using local filesystem.
@@ -387,6 +390,7 @@ func (f *FS) RebuildIndex() error {
 				return nil
 			}
 			relPath, _ := filepath.Rel(f.wikiDir(), path)
+			relPath = filepath.ToSlash(relPath)
 			if relPath == cat+"/index.md" {
 				return nil
 			}
@@ -400,22 +404,25 @@ func (f *FS) RebuildIndex() error {
 	var sections []string
 	for _, cat := range categories {
 		pages := catPages[cat]
-		var lines []string
+		var rootLines []string
+		var catLines []string
 		for _, p := range pages {
-			lines = append(lines, fmt.Sprintf("- [%s](%s) — %s", filepath.Base(p.relPath), p.relPath, p.desc))
+			rootLines = append(rootLines, fmt.Sprintf("- [%s](%s) — %s", filepath.Base(p.relPath), p.relPath, p.desc))
+			catLink := strings.TrimPrefix(p.relPath, cat+"/")
+			catLines = append(catLines, fmt.Sprintf("- [%s](%s) — %s", filepath.Base(p.relPath), catLink, p.desc))
 		}
 
 		catIndexPath := filepath.Join(f.wikiDir(), cat, "index.md")
 		catContent := fmt.Sprintf("# %s\n\n", capitalize(cat))
-		if len(lines) == 0 {
+		if len(catLines) == 0 {
 			catContent += "_No pages yet._\n"
 		} else {
-			catContent += strings.Join(lines, "\n") + "\n"
+			catContent += strings.Join(catLines, "\n") + "\n"
 		}
 		_ = os.WriteFile(catIndexPath, []byte(catContent), 0644)
 
-		if len(lines) > 0 {
-			sections = append(sections, fmt.Sprintf("## %s\n\n%s", cat, strings.Join(lines, "\n")))
+		if len(rootLines) > 0 {
+			sections = append(sections, fmt.Sprintf("## %s\n\n%s", cat, strings.Join(rootLines, "\n")))
 		}
 	}
 
@@ -557,22 +564,82 @@ func capitalize(s string) string {
 }
 
 func extractPageDescription(path string) string {
-	file, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}
-	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "<!--") || strings.HasPrefix(line, "#") {
+	desc, body := splitPageDescriptionFrontmatter(string(data))
+	desc = normalizeIndexDescription(desc)
+	if desc != "" {
+		return truncateRunes(desc, 100)
+	}
+	return extractBodyDescription(body)
+}
+
+type pageDescriptionFrontmatter struct {
+	Description string `yaml:"description"`
+}
+
+func splitPageDescriptionFrontmatter(content string) (string, string) {
+	content = strings.TrimPrefix(content, "\ufeff")
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	content = strings.ReplaceAll(content, "\r", "\n")
+	if !strings.HasPrefix(content, "---\n") {
+		return "", content
+	}
+
+	lines := strings.Split(content, "\n")
+	for i := 1; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) != "---" {
 			continue
 		}
-		if len(line) > 100 {
-			return line[:100] + "..."
+		raw := strings.Join(lines[1:i], "\n")
+		body := strings.Join(lines[i+1:], "\n")
+		var fm pageDescriptionFrontmatter
+		if err := yaml.Unmarshal([]byte(raw), &fm); err != nil {
+			return "", body
 		}
-		return line
+		return fm.Description, body
+	}
+	return "", content
+}
+
+func extractBodyDescription(body string) string {
+	inFence := false
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if isFenceDelimiter(trimmed) {
+			inFence = !inFence
+			continue
+		}
+		if inFence || trimmed == "" || strings.HasPrefix(trimmed, "<!--") || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		desc := normalizeIndexDescription(trimmed)
+		if desc == "" {
+			continue
+		}
+		return truncateRunes(desc, 100)
 	}
 	return ""
+}
+
+func isFenceDelimiter(line string) bool {
+	return strings.HasPrefix(line, "```") || strings.HasPrefix(line, "~~~")
+}
+
+var markdownLinkRE = regexp.MustCompile(`!?\[([^\]\n]+)\]\([^)]+\)`)
+
+func normalizeIndexDescription(s string) string {
+	s = markdownLinkRE.ReplaceAllString(s, "$1")
+	return strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
+}
+
+func truncateRunes(s string, max int) string {
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max]) + "..."
 }

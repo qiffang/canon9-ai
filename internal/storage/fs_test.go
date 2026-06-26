@@ -205,6 +205,12 @@ func TestRebuildIndexGeneratesCategorySubIndexes(t *testing.T) {
 	if !strings.Contains(string(data2), "db9.md") {
 		t.Error("semantic/index.md should list db9.md")
 	}
+	if strings.Contains(string(data2), "(semantic/projects/db9.md)") {
+		t.Error("semantic/index.md should use links relative to semantic/index.md")
+	}
+	if !strings.Contains(string(data2), "(projects/db9.md)") {
+		t.Error("semantic/index.md should link to projects/db9.md")
+	}
 
 	// Empty categories should still get an index.
 	data3, err := os.ReadFile(filepath.Join(fs.wikiDir(), "episodic", "index.md"))
@@ -213,6 +219,74 @@ func TestRebuildIndexGeneratesCategorySubIndexes(t *testing.T) {
 	}
 	if !strings.Contains(string(data3), "No pages yet") {
 		t.Error("empty category index should say 'No pages yet'")
+	}
+}
+
+func TestRebuildIndexUsesFrontmatterDescriptionAndSafeUTF8Truncation(t *testing.T) {
+	fs := newTestFS(t)
+	longChinese := "See [Related](related.md). " + strings.Repeat("中国市场结构性行情持续演化", 20)
+
+	_ = fs.WriteWikiPage("semantic/market/cjk.md", `---
+type: concept
+title: CJK
+description: "`+longChinese+`"
+timestamp: "2026-06-16T12:00:00Z"
+memory_type: semantic
+source_events: [evt_001]
+trust_tier: T1
+---
+# CJK
+
+`+"```"+`
+code block should not become description
+`+"```"+`
+
+Body fallback should not be used.
+`)
+
+	if err := fs.RebuildIndex(); err != nil {
+		t.Fatal(err)
+	}
+
+	idx, err := fs.ReadWikiIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(idx, "�") {
+		t.Fatalf("index should not contain invalid UTF-8 replacement characters:\n%s", idx)
+	}
+	if strings.Contains(idx, "code block should not become description") || strings.Contains(idx, "Body fallback") {
+		t.Fatalf("index should use frontmatter description before body fallback:\n%s", idx)
+	}
+	if !strings.Contains(idx, "中国市场结构性行情持续演化") {
+		t.Fatalf("index should include frontmatter description:\n%s", idx)
+	}
+	if strings.Contains(idx, "](related.md)") {
+		t.Fatalf("index description should strip markdown links copied from page frontmatter:\n%s", idx)
+	}
+	if !strings.Contains(idx, "Related") {
+		t.Fatalf("index description should preserve markdown link text:\n%s", idx)
+	}
+}
+
+func TestRebuildIndexSkipsFencedCodeFallback(t *testing.T) {
+	fs := newTestFS(t)
+
+	_ = fs.WriteWikiPage("semantic/code-first.md", "# Code First\n\n```\ncode block should not become description\n```\n\nUseful fallback summary.\n")
+
+	if err := fs.RebuildIndex(); err != nil {
+		t.Fatal(err)
+	}
+
+	idx, err := fs.ReadWikiIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(idx, "```") || strings.Contains(idx, "code block should not become description") {
+		t.Fatalf("index should skip fenced code fallback lines:\n%s", idx)
+	}
+	if !strings.Contains(idx, "Useful fallback summary.") {
+		t.Fatalf("index should use first non-code fallback line:\n%s", idx)
 	}
 }
 

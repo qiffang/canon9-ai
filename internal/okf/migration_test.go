@@ -142,6 +142,26 @@ func TestMigrateLegacyMarkdownEscapesSpaceDestinations(t *testing.T) {
 	}
 }
 
+func TestMigrateLegacyMarkdownDescriptionTruncatesUTF8Safely(t *testing.T) {
+	root := t.TempDir()
+	longChinese := strings.Repeat("中国市场结构性行情持续演化", 20)
+	input := "<!-- compiled_from: evt_001 -->\n# 中文页面\n\n" + longChinese + "\n"
+
+	got, changed, err := MigrateLegacyMarkdown(root, "semantic/cjk.md", input, time.Date(2026, 6, 16, 12, 0, 0, 0, time.UTC), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("expected migration change")
+	}
+	if strings.Contains(got, `\x`) || strings.Contains(got, "�") {
+		t.Fatalf("description should not contain broken UTF-8 escapes or replacement chars:\n%s", got)
+	}
+	if !strings.Contains(got, "中国市场结构性行情持续演化") {
+		t.Fatalf("description should contain CJK text:\n%s", got)
+	}
+}
+
 func TestMigrateLegacyBundleDryRunWriteBackupAndCheck(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "semantic/a.md", "<!-- compiled_from: evt_001 -->\n# A\n\nSee [[procedural/b]].\n")

@@ -390,17 +390,35 @@ func extractTitle(body, rel string) string {
 }
 
 func extractDescription(body, title string) string {
+	inFence := false
 	for _, line := range strings.Split(body, "\n") {
 		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "<!--") {
+		if isFenceDelimiter(trimmed) {
+			inFence = !inFence
 			continue
 		}
-		if len(trimmed) > 160 {
-			return trimmed[:160] + "..."
+		if inFence || trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "<!--") {
+			continue
 		}
-		return trimmed
+		trimmed = strings.Join(strings.Fields(trimmed), " ")
+		if trimmed == "" {
+			continue
+		}
+		return truncateRunes(trimmed, 160)
 	}
 	return title
+}
+
+func isFenceDelimiter(line string) bool {
+	return strings.HasPrefix(line, "```") || strings.HasPrefix(line, "~~~")
+}
+
+func truncateRunes(s string, max int) string {
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max]) + "..."
 }
 
 func splitFrontmatterRaw(content string) (string, string, error) {
