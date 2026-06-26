@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/qiffang/engram9/internal/agent"
 	"github.com/qiffang/engram9/internal/storage"
@@ -40,6 +41,29 @@ func newTestHandler(t *testing.T) *Handler {
 		ingest:  agent.NewIngestAgent(llm, executor),
 		query:   agent.NewQueryAgent(llm, executor),
 		compile: agent.NewCompileAgent(llm, executor),
+	}
+}
+
+func TestIngestTimeoutFromEnv(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  time.Duration
+	}{
+		{name: "default", value: "", want: defaultIngestTimeout},
+		{name: "configured", value: "10m", want: 10 * time.Minute},
+		{name: "invalid", value: "slow", want: defaultIngestTimeout},
+		{name: "zero", value: "0s", want: defaultIngestTimeout},
+		{name: "negative", value: "-1s", want: defaultIngestTimeout},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(ingestTimeoutEnv, tt.value)
+			if got := ingestTimeoutFromEnv(); got != tt.want {
+				t.Fatalf("ingestTimeoutFromEnv()=%s, want %s", got, tt.want)
+			}
+		})
 	}
 }
 
