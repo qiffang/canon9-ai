@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,6 +26,38 @@ func (m *mockLLM) Call(_ context.Context, req agent.LLMRequest) (*agent.LLMRespo
 		},
 		StopReason: "end_turn",
 	}, nil
+}
+
+type compileCursorLLM struct {
+	callCount int
+}
+
+func (m *compileCursorLLM) Call(_ context.Context, _ agent.LLMRequest) (*agent.LLMResponse, error) {
+	m.callCount++
+	if m.callCount == 1 {
+		return &agent.LLMResponse{
+			Content: []agent.ContentBlock{{
+				Type:  "tool_use",
+				ID:    "call_1",
+				Name:  "read_events_since",
+				Input: json.RawMessage(`{"cursor": 0}`),
+			}},
+			StopReason: "tool_use",
+		}, nil
+	}
+	return &agent.LLMResponse{
+		Content:    []agent.ContentBlock{{Type: "text", Text: "compiled"}},
+		StopReason: "end_turn",
+	}, nil
+}
+
+type failingCursorStore struct {
+	storage.Store
+	err error
+}
+
+func (s *failingCursorStore) SetCompileCursor(_ uint64) error {
+	return s.err
 }
 
 func newTestHandler(t *testing.T) *Handler {
@@ -187,6 +220,50 @@ func TestCompileEndpoint(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d, want 200", resp.StatusCode)
+	}
+}
+
+func TestCompileEndpointReturnsErrorWhenCursorPersistFails(t *testing.T) {
+	dir := t.TempDir()
+	baseStore, err := storage.NewFS(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := baseStore.AppendEvent(storage.Event{
+		Content:    "event",
+		Durability: "long-term",
+		SourceType: "user",
+		TrustTier:  1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	store := &failingCursorStore{
+		Store: baseStore,
+		err:   errors.New("cursor write failed"),
+	}
+	llm := &compileCursorLLM{}
+	executor := agent.NewToolExecutor(store)
+	h := &Handler{
+		store:   store,
+		compile: agent.NewCompileAgent(llm, executor),
+	}
+	srv := httptest.NewServer(h.Routes())
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/compile",
+		"application/json",
+		strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status=%d, want 500", resp.StatusCode)
+	}
+	if got := baseStore.GetCompileCursor(); got != 0 {
+		t.Fatalf("cursor=%d, want 0", got)
 	}
 }
 

@@ -123,6 +123,10 @@ func (f *FS) AppendEvent(ev Event) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	if err := os.MkdirAll(filepath.Dir(f.rawPath()), 0755); err != nil {
+		return "", fmt.Errorf("create raw dir: %w", err)
+	}
+
 	file, err := os.OpenFile(f.rawPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return "", fmt.Errorf("open raw log: %w", err)
@@ -473,6 +477,9 @@ func (f *FS) GetMemoryStats() (*MemoryStats, error) {
 
 // SetCompileCursor persists the compile cursor to disk and updates in-memory state.
 func (f *FS) SetCompileCursor(cursor uint64) error {
+	if err := os.MkdirAll(filepath.Dir(f.cursorPath()), 0755); err != nil {
+		return fmt.Errorf("create raw dir: %w", err)
+	}
 	return os.WriteFile(f.cursorPath(), []byte(strconv.FormatUint(cursor, 10)), 0644)
 }
 

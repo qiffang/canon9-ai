@@ -387,6 +387,25 @@ func TestCompileCursorPersistence(t *testing.T) {
 	}
 }
 
+func TestSetCompileCursorRecreatesRawDir(t *testing.T) {
+	dir := t.TempDir()
+
+	fs, err := NewFS(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(dir, "raw")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fs.SetCompileCursor(31); err != nil {
+		t.Fatal(err)
+	}
+	if v := fs.GetCompileCursor(); v != 31 {
+		t.Fatalf("expected cursor=31, got %d", v)
+	}
+}
+
 func TestWriteWikiPageWithMeta(t *testing.T) {
 	fs := newTestFS(t)
 

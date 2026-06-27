@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -200,6 +201,8 @@ func (h *Handler) handleCompile(w http.ResponseWriter, r *http.Request) {
 	if newCursor > cursor {
 		if err := h.store.SetCompileCursor(newCursor); err != nil {
 			log.Printf("[api] persist cursor error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, APIResponse{Error: fmt.Sprintf("persist cursor: %v", err)})
+			return
 		}
 	}
 
@@ -285,6 +288,7 @@ func (h *Handler) runCompile(ctx context.Context) {
 	if newCursor > cursor {
 		if err := h.store.SetCompileCursor(newCursor); err != nil {
 			log.Printf("[auto-compile] persist cursor error: %v", err)
+			return
 		}
 	}
 	log.Printf("[auto-compile] done: cursor %d -> %d", cursor, newCursor)
