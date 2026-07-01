@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -50,5 +51,39 @@ func TestRunMigrateOKFRejectsWriteAndCheck(t *testing.T) {
 	root := t.TempDir()
 	if code := runMigrateOKF([]string{"--write", "--check", root}); code != 2 {
 		t.Fatalf("code=%d, want 2", code)
+	}
+}
+
+func TestRunRepoScanWritesOutput(t *testing.T) {
+	root := t.TempDir()
+	runCLIGit(t, root, "init")
+	runCLIGit(t, root, "config", "user.email", "test@example.com")
+	runCLIGit(t, root, "config", "user.name", "Test User")
+	writeCLIFile(t, root, "pkg/fuse/a.go", "package fuse\n\ntype A struct{}\n")
+	runCLIGit(t, root, "add", "-A")
+	runCLIGit(t, root, "commit", "-m", "initial")
+
+	out := filepath.Join(t.TempDir(), "facts")
+	if code := runRepo([]string{"scan", "--path", root, "--scope", "pkg/fuse", "--out", out}); code != 0 {
+		t.Fatalf("repo scan code=%d, want 0", code)
+	}
+	if _, err := os.Stat(filepath.Join(out, "manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(out, "facts.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(out, "snippets.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func runCLIGit(t *testing.T, root string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 }
