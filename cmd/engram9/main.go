@@ -12,6 +12,7 @@ import (
 	"github.com/qiffang/engram9/internal/agent"
 	"github.com/qiffang/engram9/internal/api"
 	"github.com/qiffang/engram9/internal/okf"
+	"github.com/qiffang/engram9/internal/repo"
 )
 
 func main() {
@@ -21,6 +22,8 @@ func main() {
 			os.Exit(runValidate(os.Args[2:]))
 		case "migrate-okf":
 			os.Exit(runMigrateOKF(os.Args[2:]))
+		case "repo":
+			os.Exit(runRepo(os.Args[2:]))
 		}
 	}
 	runServe(os.Args[1:])
@@ -138,6 +141,54 @@ func runMigrateOKF(args []string) int {
 	}
 	if *check && result.ChangedCount() > 0 {
 		return 1
+	}
+	return 0
+}
+
+func runRepo(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: engram9 repo <scan>")
+		return 2
+	}
+	switch args[0] {
+	case "scan":
+		return runRepoScan(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "unknown repo command %q\n", args[0])
+		fmt.Fprintln(os.Stderr, "usage: engram9 repo <scan>")
+		return 2
+	}
+}
+
+func runRepoScan(args []string) int {
+	flags := flag.NewFlagSet("engram9 repo scan", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	repoPath := flags.String("path", ".", "git repository path")
+	scope := flags.String("scope", ".", "repo-relative scope to scan")
+	since := flags.String("since", "", "base commit for incremental scan")
+	outDir := flags.String("out", "", "output directory; writes manifest.json, facts.jsonl, and snippets.jsonl (default: JSON to stdout)")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage: engram9 repo scan [--path <repo>] [--scope <repo-rel-path>] [--since <commit>] [--out <dir>]")
+		return 2
+	}
+	bundle, err := repo.Scan(repo.ScanOptions{
+		RepoPath: *repoPath,
+		Scope:    *scope,
+		Since:    *since,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "repo scan: %v\n", err)
+		return 1
+	}
+	if err := repo.WriteBundle(bundle, *outDir); err != nil {
+		fmt.Fprintf(os.Stderr, "repo scan: write output: %v\n", err)
+		return 1
+	}
+	if *outDir != "" {
+		fmt.Fprintf(os.Stdout, "repo scan wrote %d fact(s), %d file(s): %s\n", len(bundle.Facts), len(bundle.Manifest.Files), *outDir)
 	}
 	return 0
 }

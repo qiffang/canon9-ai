@@ -115,6 +115,7 @@ Current CLI support covers validation and legacy migration:
 
 - `engram9 validate [--strict] <bundle-dir>` checks an OKF-compatible bundle.
 - `engram9 migrate-okf <bundle-dir>` converts legacy engram9 Markdown into OKF-compatible pages.
+- `engram9 repo scan` emits deterministic, source-grounded code facts and core snippets for a git repo scope.
 
 Full `engram9 export okf` / `engram9 import okf` commands are deferred; see [docs/okf-compatibility.md](docs/okf-compatibility.md) for the acceptance criteria.
 
@@ -137,6 +138,10 @@ LLM_PROVIDER=openai OPENAI_API_KEY=xxx OPENAI_BASE_URL=https://your-api/v1 \
 # Migrate legacy HTML-comment metadata and [[wikilinks]]
 ./engram9 migrate-okf ./data/wiki
 ./engram9 migrate-okf --write ./data/wiki
+
+# Scan repo code facts and snippets without LLM summarization
+./engram9 repo scan --path /path/to/drive9 --scope pkg/fuse --out ./repo-facts/pkg-fuse
+./engram9 repo scan --path /path/to/drive9 --scope pkg/fuse --since <old-sha> --out ./repo-facts/pkg-fuse
 ```
 
 ## API
