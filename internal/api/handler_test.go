@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -294,6 +295,109 @@ func TestStatusIncludesIngestErrorCount(t *testing.T) {
 	}
 	if stats.IngestErrorCount != 0 {
 		t.Errorf("initial ingest_error_count=%d, want 0", stats.IngestErrorCount)
+	}
+}
+
+func TestRememberInvalidSourceType(t *testing.T) {
+	h := newTestHandler(t)
+	srv := httptest.NewServer(h.Routes())
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/remember",
+		"application/json",
+		strings.NewReader(`{"text":"test","source_type":"repo_scan"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", resp.StatusCode)
+	}
+}
+
+func TestRememberInvalidEvidenceKind(t *testing.T) {
+	h := newTestHandler(t)
+	srv := httptest.NewServer(h.Routes())
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/remember",
+		"application/json",
+		strings.NewReader(`{"text":"test","evidence_kind":"guess"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", resp.StatusCode)
+	}
+}
+
+func TestRememberInvalidTrustTier(t *testing.T) {
+	h := newTestHandler(t)
+	srv := httptest.NewServer(h.Routes())
+	defer srv.Close()
+
+	for _, body := range []string{
+		`{"text":"test","trust_tier":0}`,
+		`{"text":"test","trust_tier":4}`,
+		`{"text":"test","trust_tier":-1}`,
+	} {
+		resp, err := http.Post(srv.URL+"/remember",
+			"application/json",
+			strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("body=%s status=%d, want 400", body, resp.StatusCode)
+		}
+	}
+}
+
+// failingLLM always returns an error, used to test async ingest error counting.
+type failingLLM struct{}
+
+func (f *failingLLM) Call(_ context.Context, _ agent.LLMRequest) (*agent.LLMResponse, error) {
+	return nil, fmt.Errorf("simulated LLM failure")
+}
+
+func TestIngestErrorCountIncrementsOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.NewFS(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm := &failingLLM{}
+	executor := agent.NewToolExecutor(store)
+	h := &Handler{
+		store:   store,
+		ingest:  agent.NewIngestAgent(llm, executor),
+		query:   agent.NewQueryAgent(llm, executor),
+		compile: agent.NewCompileAgent(llm, executor),
+	}
+	srv := httptest.NewServer(h.Routes())
+	defer srv.Close()
+	defer h.Wait()
+
+	resp, err := http.Post(srv.URL+"/remember",
+		"application/json",
+		strings.NewReader(`{"text":"trigger failure"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want 200", resp.StatusCode)
+	}
+
+	// Wait for async integration to complete.
+	h.Wait()
+
+	if got := h.ingestErrors.Load(); got != 1 {
+		t.Fatalf("ingest_error_count=%d, want 1", got)
 	}
 }
 

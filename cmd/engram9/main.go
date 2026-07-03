@@ -191,4 +191,3 @@ func runRepoScan(args []string) int {
 	}
 	return 0
 }
-

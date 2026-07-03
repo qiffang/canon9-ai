@@ -109,17 +109,29 @@ func (h *Handler) handleRemember(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[api] remember: %s", truncate(req.Text, 80))
 
-	// Synchronous: write raw event immediately.
+	// Validate optional metadata against the canonical enum contract.
 	sourceType := "user"
 	if req.SourceType != "" {
+		if !validSourceType(req.SourceType) {
+			writeJSON(w, http.StatusBadRequest, APIResponse{Error: "invalid source_type"})
+			return
+		}
 		sourceType = req.SourceType
 	}
 	evidenceKind := "user_statement"
 	if req.EvidenceKind != "" {
+		if !validEvidenceKind(req.EvidenceKind) {
+			writeJSON(w, http.StatusBadRequest, APIResponse{Error: "invalid evidence_kind"})
+			return
+		}
 		evidenceKind = req.EvidenceKind
 	}
 	trustTier := 1
 	if req.TrustTier != nil {
+		if *req.TrustTier < 1 || *req.TrustTier > 3 {
+			writeJSON(w, http.StatusBadRequest, APIResponse{Error: "invalid trust_tier: must be 1, 2, or 3"})
+			return
+		}
 		trustTier = *req.TrustTier
 	}
 	ev := storage.Event{
@@ -160,6 +172,7 @@ func (h *Handler) handleRemember(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[api] integrate done: %s", eventID)
 			if err := h.store.RebuildIndex(); err != nil {
 				log.Printf("[api] rebuild index error: %v", err)
+				h.ingestErrors.Add(1)
 			}
 		}
 	}()
@@ -327,4 +340,22 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// Validation helpers matching the canonical enum contract in tooldef.go.
+
+func validSourceType(s string) bool {
+	switch s {
+	case "user", "assistant", "tool", "system", "compiler":
+		return true
+	}
+	return false
+}
+
+func validEvidenceKind(s string) bool {
+	switch s {
+	case "direct_observation", "user_statement", "inferred", "compiler_synthesis":
+		return true
+	}
+	return false
 }

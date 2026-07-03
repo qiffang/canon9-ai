@@ -94,14 +94,15 @@ Behavior:
 - Non-Go files may appear in `manifest.changed`, but only Go source facts are emitted in the current scanner.
 - File paths are read from git with NUL-separated output so spaces in paths do not corrupt incremental scans.
 
-## Recompile contract
+## Wiki integration contract
 
-Repo facts and snippets are the source-grounded input for a later `repo compile` step. The compiler must treat code facts as the primary source of truth:
+Repo facts and snippets are chunked by package and fed into the LLM-backed server pipeline via `POST /remember` (with `source_type=tool`, `evidence_kind=direct_observation`, `trust_tier=2`). The server's ingest agent weaves them into wiki pages, and `POST /compile` synthesizes cross-cutting summaries.
 
-1. Concept pages must cite fact IDs or source anchors derived from `commit_sha + path + line + symbol`.
+The LLM must treat code facts as the primary source of truth:
+
+1. Wiki pages must cite fact IDs or source anchors derived from `commit_sha + path + line + symbol`.
 2. Design summaries must cite snippets or facts from the same `commit_sha`; claims from older commits are stale.
 3. Docs, PR bodies, issues, and review comments can explain **why**, but they must not override code facts.
-4. If a reverse index from source anchors to concepts is unavailable, the safe MVP behavior is to recompile all concepts for the changed scope.
-5. If a source anchor disappears after a later scan, the related concept must be recompiled or marked `stale_source`.
+4. If a source anchor disappears after a later scan, the related wiki page must be recompiled or marked `stale_source`.
 
 This avoids mixing knowledge from different commits and prevents agents from trusting stale line numbers or symbols after code changes.

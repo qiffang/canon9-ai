@@ -77,4 +77,3 @@ type Snippet struct {
 	FileHash  string `json:"file_hash"`
 	Content   string `json:"content"`
 }
-
