@@ -77,28 +77,3 @@ type Snippet struct {
 	FileHash  string `json:"file_hash"`
 	Content   string `json:"content"`
 }
-
-// --- Compile types ---
-
-// ConceptPage is the output of repo compile: an OKF-compatible wiki page.
-type ConceptPage struct {
-	Slug          string   `json:"slug"`
-	Title         string   `json:"title"`
-	Description   string   `json:"description"`
-	Content       string   `json:"content"`
-	SourceAnchors []string `json:"source_anchors"`
-}
-
-// CompileInput bundles everything the compiler needs.
-type CompileInput struct {
-	Facts    []Fact    `json:"facts"`
-	Snippets []Snippet `json:"snippets"`
-	Manifest Manifest  `json:"manifest"`
-}
-
-// CompileOutput is the result of a compile run.
-type CompileOutput struct {
-	Pages     []ConceptPage `json:"pages"`
-	Manifest  Manifest      `json:"manifest"`
-	PageCount int           `json:"page_count"`
-}

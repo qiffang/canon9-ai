@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -187,6 +188,216 @@ func TestCompileEndpoint(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d, want 200", resp.StatusCode)
+	}
+}
+
+func TestRememberCustomMetadata(t *testing.T) {
+	h := newTestHandler(t)
+	srv := httptest.NewServer(h.Routes())
+	defer srv.Close()
+	defer h.Wait()
+
+	resp, err := http.Post(srv.URL+"/remember",
+		"application/json",
+		strings.NewReader(`{"text":"repo scan fact","source_type":"tool","evidence_kind":"direct_observation","trust_tier":2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want 200", resp.StatusCode)
+	}
+
+	var result RememberResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.EventID == "" {
+		t.Error("expected non-empty event_id")
+	}
+
+	// Verify the stored event has the custom metadata.
+	events, err := h.store.ReadRecentEvents(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) == 0 {
+		t.Fatal("expected at least one event")
+	}
+	ev := events[len(events)-1]
+	if ev.SourceType != "tool" {
+		t.Errorf("source_type=%q, want tool", ev.SourceType)
+	}
+	if ev.EvidenceKind != "direct_observation" {
+		t.Errorf("evidence_kind=%q, want direct_observation", ev.EvidenceKind)
+	}
+	if ev.TrustTier != 2 {
+		t.Errorf("trust_tier=%d, want 2", ev.TrustTier)
+	}
+}
+
+func TestRememberDefaultMetadata(t *testing.T) {
+	h := newTestHandler(t)
+	srv := httptest.NewServer(h.Routes())
+	defer srv.Close()
+	defer h.Wait()
+
+	resp, err := http.Post(srv.URL+"/remember",
+		"application/json",
+		strings.NewReader(`{"text":"plain remember"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want 200", resp.StatusCode)
+	}
+
+	events, err := h.store.ReadRecentEvents(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) == 0 {
+		t.Fatal("expected at least one event")
+	}
+	ev := events[len(events)-1]
+	if ev.SourceType != "user" {
+		t.Errorf("default source_type=%q, want user", ev.SourceType)
+	}
+	if ev.EvidenceKind != "user_statement" {
+		t.Errorf("default evidence_kind=%q, want user_statement", ev.EvidenceKind)
+	}
+	if ev.TrustTier != 1 {
+		t.Errorf("default trust_tier=%d, want 1", ev.TrustTier)
+	}
+}
+
+func TestStatusIncludesIngestErrorCount(t *testing.T) {
+	h := newTestHandler(t)
+	srv := httptest.NewServer(h.Routes())
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want 200", resp.StatusCode)
+	}
+
+	var stats StatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
+		t.Fatal(err)
+	}
+	if stats.IngestErrorCount != 0 {
+		t.Errorf("initial ingest_error_count=%d, want 0", stats.IngestErrorCount)
+	}
+}
+
+func TestRememberInvalidSourceType(t *testing.T) {
+	h := newTestHandler(t)
+	srv := httptest.NewServer(h.Routes())
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/remember",
+		"application/json",
+		strings.NewReader(`{"text":"test","source_type":"repo_scan"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", resp.StatusCode)
+	}
+}
+
+func TestRememberInvalidEvidenceKind(t *testing.T) {
+	h := newTestHandler(t)
+	srv := httptest.NewServer(h.Routes())
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/remember",
+		"application/json",
+		strings.NewReader(`{"text":"test","evidence_kind":"guess"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", resp.StatusCode)
+	}
+}
+
+func TestRememberInvalidTrustTier(t *testing.T) {
+	h := newTestHandler(t)
+	srv := httptest.NewServer(h.Routes())
+	defer srv.Close()
+
+	for _, body := range []string{
+		`{"text":"test","trust_tier":0}`,
+		`{"text":"test","trust_tier":4}`,
+		`{"text":"test","trust_tier":-1}`,
+	} {
+		resp, err := http.Post(srv.URL+"/remember",
+			"application/json",
+			strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("body=%s status=%d, want 400", body, resp.StatusCode)
+		}
+	}
+}
+
+// failingLLM always returns an error, used to test async ingest error counting.
+type failingLLM struct{}
+
+func (f *failingLLM) Call(_ context.Context, _ agent.LLMRequest) (*agent.LLMResponse, error) {
+	return nil, fmt.Errorf("simulated LLM failure")
+}
+
+func TestIngestErrorCountIncrementsOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.NewFS(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm := &failingLLM{}
+	executor := agent.NewToolExecutor(store)
+	h := &Handler{
+		store:   store,
+		ingest:  agent.NewIngestAgent(llm, executor),
+		query:   agent.NewQueryAgent(llm, executor),
+		compile: agent.NewCompileAgent(llm, executor),
+	}
+	srv := httptest.NewServer(h.Routes())
+	defer srv.Close()
+	defer h.Wait()
+
+	resp, err := http.Post(srv.URL+"/remember",
+		"application/json",
+		strings.NewReader(`{"text":"trigger failure"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want 200", resp.StatusCode)
+	}
+
+	// Wait for async integration to complete.
+	h.Wait()
+
+	if got := h.ingestErrors.Load(); got != 1 {
+		t.Fatalf("ingest_error_count=%d, want 1", got)
 	}
 }
 
