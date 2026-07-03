@@ -27,6 +27,9 @@ type Handler struct {
 	// pendingIntegrations tracks the number of async wiki integrations in flight.
 	pendingIntegrations atomic.Int64
 
+	// ingestErrors tracks the number of failed async wiki integrations.
+	ingestErrors atomic.Int64
+
 	// wg tracks background goroutines for graceful shutdown / testing.
 	wg sync.WaitGroup
 
@@ -69,8 +72,11 @@ func (h *Handler) Routes() http.Handler {
 
 // RememberRequest is the request body for POST /remember.
 type RememberRequest struct {
-	Text    string            `json:"text"`
-	Context map[string]string `json:"context,omitempty"`
+	Text         string            `json:"text"`
+	Context      map[string]string `json:"context,omitempty"`
+	SourceType   string            `json:"source_type,omitempty"`
+	EvidenceKind string            `json:"evidence_kind,omitempty"`
+	TrustTier    *int              `json:"trust_tier,omitempty"`
 }
 
 // RecallRequest is the request body for POST /recall.
@@ -104,6 +110,18 @@ func (h *Handler) handleRemember(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[api] remember: %s", truncate(req.Text, 80))
 
 	// Synchronous: write raw event immediately.
+	sourceType := "user"
+	if req.SourceType != "" {
+		sourceType = req.SourceType
+	}
+	evidenceKind := "user_statement"
+	if req.EvidenceKind != "" {
+		evidenceKind = req.EvidenceKind
+	}
+	trustTier := 1
+	if req.TrustTier != nil {
+		trustTier = *req.TrustTier
+	}
 	ev := storage.Event{
 		Content:       req.Text,
 		Actor:         req.Context["actor"],
@@ -113,9 +131,9 @@ func (h *Handler) handleRemember(w http.ResponseWriter, r *http.Request) {
 		ActiveTask:    req.Context["active_task"],
 		Durability:    "long-term",
 		Actionability: "informational",
-		SourceType:    "user",
-		EvidenceKind:  "user_statement",
-		TrustTier:     1,
+		SourceType:    sourceType,
+		EvidenceKind:  evidenceKind,
+		TrustTier:     trustTier,
 	}
 
 	eventID, err := h.store.AppendEvent(ev)
@@ -137,6 +155,7 @@ func (h *Handler) handleRemember(w http.ResponseWriter, r *http.Request) {
 
 		if err := h.ingest.Integrate(ctx, eventID, req.Text, req.Context); err != nil {
 			log.Printf("[api] integrate error (event %s): %v", eventID, err)
+			h.ingestErrors.Add(1)
 		} else {
 			log.Printf("[api] integrate done: %s", eventID)
 			if err := h.store.RebuildIndex(); err != nil {
@@ -208,6 +227,7 @@ func (h *Handler) handleCompile(w http.ResponseWriter, r *http.Request) {
 type StatusResponse struct {
 	storage.MemoryStats
 	PendingIntegrations int64 `json:"pending_integrations"`
+	IngestErrorCount    int64 `json:"ingest_error_count"`
 }
 
 func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -220,6 +240,7 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, StatusResponse{
 		MemoryStats:         *stats,
 		PendingIntegrations: h.pendingIntegrations.Load(),
+		IngestErrorCount:    h.ingestErrors.Load(),
 	})
 }
 

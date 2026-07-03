@@ -147,14 +147,12 @@ func runMigrateOKF(args []string) int {
 
 func runRepo(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: engram9 repo <scan|compile> [options]")
+		fmt.Fprintln(os.Stderr, "usage: engram9 repo <scan> [options]")
 		return 2
 	}
 	switch args[0] {
 	case "scan":
 		return runRepoScan(args[1:])
-	case "compile":
-		return runRepoCompile(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown repo subcommand: %s\n", args[0])
 		return 2
@@ -194,37 +192,3 @@ func runRepoScan(args []string) int {
 	return 0
 }
 
-func runRepoCompile(args []string) int {
-	flags := flag.NewFlagSet("engram9 repo compile", flag.ContinueOnError)
-	flags.SetOutput(os.Stderr)
-	scanDir := flags.String("scan-dir", "", "directory containing facts.jsonl, snippets.jsonl, manifest.json from repo scan")
-	outputDir := flags.String("output", "./repo-wiki", "output directory for compiled concept pages")
-	if err := flags.Parse(args); err != nil {
-		return 2
-	}
-	if *scanDir == "" {
-		fmt.Fprintln(os.Stderr, "error: --scan-dir is required")
-		fmt.Fprintln(os.Stderr, "usage: engram9 repo compile --scan-dir <dir> [--output <dir>]")
-		return 2
-	}
-
-	input, err := repo.LoadInput(*scanDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error loading scan data: %v\n", err)
-		return 1
-	}
-
-	compiler := repo.NewCompiler(*outputDir)
-	output, err := compiler.Compile(input)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error compiling: %v\n", err)
-		return 1
-	}
-
-	fmt.Fprintf(os.Stdout, "repo compile: %d concept pages generated in %s (commit: %.8s, scope: %s)\n",
-		output.PageCount, *outputDir, output.Manifest.HeadSHA, output.Manifest.Scope)
-	for _, page := range output.Pages {
-		fmt.Fprintf(os.Stdout, "  %s — %s\n", page.Slug, page.Description)
-	}
-	return 0
-}
