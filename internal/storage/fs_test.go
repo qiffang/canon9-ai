@@ -197,13 +197,21 @@ func TestRebuildIndexGeneratesCategorySubIndexes(t *testing.T) {
 		t.Error("prospective/index.md should list notify-alice.md")
 	}
 
-	// semantic/index.md should exist.
+	// semantic/index.md should exist and use category-relative paths.
 	data2, err := os.ReadFile(filepath.Join(fs.wikiDir(), "semantic", "index.md"))
 	if err != nil {
 		t.Fatalf("semantic/index.md should exist: %v", err)
 	}
 	if !strings.Contains(string(data2), "db9.md") {
 		t.Error("semantic/index.md should list db9.md")
+	}
+	// Category sub-index links must be relative to the category dir,
+	// not the wiki root, so validate --strict resolves them correctly.
+	if strings.Contains(string(data2), "semantic/projects/db9.md") {
+		t.Error("semantic/index.md should use category-relative path (projects/db9.md), not wiki-root-relative (semantic/projects/db9.md)")
+	}
+	if !strings.Contains(string(data2), "(projects/db9.md)") {
+		t.Error("semantic/index.md should contain link to (projects/db9.md)")
 	}
 
 	// Empty categories should still get an index.
