@@ -222,3 +222,45 @@ func TestValidateBundleMissingFrontmatter(t *testing.T) {
 		t.Fatalf("WarningCount=%d, issues=%#v", result.WarningCount(), result.Issues)
 	}
 }
+
+func TestValidateBundleCategorySubIndexRelativeLinks(t *testing.T) {
+	root := t.TempDir()
+	// Root index with wiki-root-relative links.
+	writeFile(t, root, "index.md", "# Index\n\n- [A](semantic/projects/a.md)\n")
+	// Category sub-index with category-relative links (not semantic/projects/a.md).
+	writeFile(t, root, "semantic/index.md", "# Semantic\n\n- [A](projects/a.md)\n")
+	writeFile(t, root, "semantic/projects/a.md", `---
+type: concept
+title: "A"
+description: "A page"
+timestamp: "2026-06-16T12:00:00Z"
+memory_type: semantic
+source_events:
+  - evt_001
+trust_tier: T1
+---
+# A
+`)
+
+	result, err := ValidateBundle(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Issues) != 0 {
+		t.Fatalf("category sub-index relative links should resolve: %#v", result.Issues)
+	}
+}
+
+func TestValidateBundleCategorySubIndexBrokenLink(t *testing.T) {
+	root := t.TempDir()
+	// Category sub-index with a genuinely broken link.
+	writeFile(t, root, "semantic/index.md", "# Semantic\n\n- [Missing](nonexistent/page.md)\n")
+
+	result, err := ValidateBundle(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.WarningCount() != 1 {
+		t.Fatalf("should detect 1 broken link, got issues=%#v", result.Issues)
+	}
+}

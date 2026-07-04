@@ -400,22 +400,27 @@ func (f *FS) RebuildIndex() error {
 	var sections []string
 	for _, cat := range categories {
 		pages := catPages[cat]
-		var lines []string
+		// Root index uses wiki-root-relative paths; category sub-index uses
+		// paths relative to the category directory.
+		var rootLines []string
+		var catLines []string
 		for _, p := range pages {
-			lines = append(lines, fmt.Sprintf("- [%s](%s) — %s", filepath.Base(p.relPath), p.relPath, p.desc))
+			rootLines = append(rootLines, fmt.Sprintf("- [%s](%s) — %s", filepath.Base(p.relPath), p.relPath, p.desc))
+			catRelPath := strings.TrimPrefix(p.relPath, cat+"/")
+			catLines = append(catLines, fmt.Sprintf("- [%s](%s) — %s", filepath.Base(p.relPath), catRelPath, p.desc))
 		}
 
 		catIndexPath := filepath.Join(f.wikiDir(), cat, "index.md")
 		catContent := fmt.Sprintf("# %s\n\n", capitalize(cat))
-		if len(lines) == 0 {
+		if len(catLines) == 0 {
 			catContent += "_No pages yet._\n"
 		} else {
-			catContent += strings.Join(lines, "\n") + "\n"
+			catContent += strings.Join(catLines, "\n") + "\n"
 		}
 		_ = os.WriteFile(catIndexPath, []byte(catContent), 0644)
 
-		if len(lines) > 0 {
-			sections = append(sections, fmt.Sprintf("## %s\n\n%s", cat, strings.Join(lines, "\n")))
+		if len(rootLines) > 0 {
+			sections = append(sections, fmt.Sprintf("## %s\n\n%s", cat, strings.Join(rootLines, "\n")))
 		}
 	}
 
