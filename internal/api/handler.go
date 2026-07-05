@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -35,16 +36,38 @@ type Handler struct {
 
 	// ingestTimeout bounds async /remember wiki integration.
 	ingestTimeout time.Duration
+
+	// integrationSlots bounds concurrent async wiki integrations.
+	integrationSlots          chan struct{}
+	maxConcurrentIntegrations int
+
+	maxToolLoops int
+
+	llmRetryAttempts int
+	llmRetryBackoff  time.Duration
+	llmCallTimeout   time.Duration
+	llmProvider      string
+	llmModel         string
+	llmBaseURL       string
 }
 
 const (
-	defaultIngestTimeout = 2 * time.Minute
-	ingestTimeoutEnv     = "ENGRAM9_INGEST_TIMEOUT"
+	defaultIngestTimeout             = 5 * time.Minute
+	defaultMaxConcurrentIntegrations = 4
+	ingestTimeoutEnv                 = "ENGRAM9_INGEST_TIMEOUT"
+	maxConcurrentIntegrationsEnv     = "ENGRAM9_MAX_CONCURRENT_INTEGRATIONS"
 )
 
 type Options struct {
-	MaxToolLoops  int
-	IngestTimeout time.Duration
+	MaxToolLoops              int
+	IngestTimeout             time.Duration
+	MaxConcurrentIntegrations int
+	LLMRetryAttempts          int
+	LLMRetryBackoff           time.Duration
+	LLMCallTimeout            time.Duration
+	LLMProvider               string
+	LLMModel                  string
+	LLMBaseURL                string
 }
 
 // New creates a new API handler with all agents wired up.
@@ -59,18 +82,35 @@ func NewWithOptions(dataDir string, llm agent.LLM, opts Options) (*Handler, erro
 	}
 
 	executor := agent.NewToolExecutor(store)
-	runnerOpts := agent.RunnerOptions{MaxToolLoops: opts.MaxToolLoops}
+	maxToolLoops := opts.MaxToolLoops
+	if maxToolLoops <= 0 {
+		maxToolLoops = agent.DefaultMaxToolLoops
+	}
+	runnerOpts := agent.RunnerOptions{MaxToolLoops: maxToolLoops}
 	ingestTimeout := opts.IngestTimeout
 	if ingestTimeout <= 0 {
 		ingestTimeout = ingestTimeoutFromEnv()
 	}
+	maxConcurrentIntegrations := opts.MaxConcurrentIntegrations
+	if maxConcurrentIntegrations <= 0 {
+		maxConcurrentIntegrations = maxConcurrentIntegrationsFromEnv()
+	}
 
 	return &Handler{
-		store:         store,
-		ingest:        agent.NewIngestAgentWithOptions(llm, executor, runnerOpts),
-		query:         agent.NewQueryAgentWithOptions(llm, executor, runnerOpts),
-		compile:       agent.NewCompileAgentWithOptions(llm, executor, runnerOpts),
-		ingestTimeout: ingestTimeout,
+		store:                     store,
+		ingest:                    agent.NewIngestAgentWithOptions(llm, executor, runnerOpts),
+		query:                     agent.NewQueryAgentWithOptions(llm, executor, runnerOpts),
+		compile:                   agent.NewCompileAgentWithOptions(llm, executor, runnerOpts),
+		ingestTimeout:             ingestTimeout,
+		integrationSlots:          make(chan struct{}, maxConcurrentIntegrations),
+		maxConcurrentIntegrations: maxConcurrentIntegrations,
+		maxToolLoops:              maxToolLoops,
+		llmRetryAttempts:          opts.LLMRetryAttempts,
+		llmRetryBackoff:           opts.LLMRetryBackoff,
+		llmCallTimeout:            opts.LLMCallTimeout,
+		llmProvider:               opts.LLMProvider,
+		llmModel:                  opts.LLMModel,
+		llmBaseURL:                opts.LLMBaseURL,
 	}, nil
 }
 
@@ -176,6 +216,9 @@ func (h *Handler) handleRemember(w http.ResponseWriter, r *http.Request) {
 		defer h.wg.Done()
 		defer h.pendingIntegrations.Add(-1)
 
+		releaseSlot := h.acquireIntegrationSlot()
+		defer releaseSlot()
+
 		ctx, cancel := context.WithTimeout(context.Background(), h.effectiveIngestTimeout())
 		defer cancel()
 
@@ -253,8 +296,17 @@ func (h *Handler) handleCompile(w http.ResponseWriter, r *http.Request) {
 // StatusResponse extends MemoryStats with runtime info.
 type StatusResponse struct {
 	storage.MemoryStats
-	PendingIntegrations int64 `json:"pending_integrations"`
-	IngestErrorCount    int64 `json:"ingest_error_count"`
+	PendingIntegrations       int64  `json:"pending_integrations"`
+	IngestErrorCount          int64  `json:"ingest_error_count"`
+	IngestTimeout             string `json:"ingest_timeout"`
+	MaxConcurrentIntegrations int    `json:"max_concurrent_integrations"`
+	MaxToolLoops              int    `json:"max_tool_loops"`
+	LLMRetryAttempts          int    `json:"llm_retry_attempts"`
+	LLMRetryBackoff           string `json:"llm_retry_backoff"`
+	LLMCallTimeout            string `json:"llm_call_timeout"`
+	LLMProvider               string `json:"llm_provider,omitempty"`
+	LLMModel                  string `json:"llm_model,omitempty"`
+	LLMBaseURL                string `json:"llm_base_url,omitempty"`
 }
 
 func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -265,14 +317,43 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, StatusResponse{
-		MemoryStats:         *stats,
-		PendingIntegrations: h.pendingIntegrations.Load(),
-		IngestErrorCount:    h.ingestErrors.Load(),
+		MemoryStats:               *stats,
+		PendingIntegrations:       h.pendingIntegrations.Load(),
+		IngestErrorCount:          h.ingestErrors.Load(),
+		IngestTimeout:             h.effectiveIngestTimeout().String(),
+		MaxConcurrentIntegrations: h.maxConcurrentIntegrations,
+		MaxToolLoops:              h.maxToolLoops,
+		LLMRetryAttempts:          h.llmRetryAttempts,
+		LLMRetryBackoff:           h.llmRetryBackoff.String(),
+		LLMCallTimeout:            h.llmCallTimeout.String(),
+		LLMProvider:               h.llmProvider,
+		LLMModel:                  h.llmModel,
+		LLMBaseURL:                h.llmBaseURL,
 	})
 }
 
 // Wait blocks until all background integrations finish. Used for testing and graceful shutdown.
 func (h *Handler) Wait() { h.wg.Wait() }
+
+func (h *Handler) EffectiveIngestTimeout() time.Duration {
+	return h.effectiveIngestTimeout()
+}
+
+func (h *Handler) MaxConcurrentIntegrations() int {
+	return h.maxConcurrentIntegrations
+}
+
+func (h *Handler) MaxToolLoops() int {
+	return h.maxToolLoops
+}
+
+func (h *Handler) acquireIntegrationSlot() func() {
+	if h.integrationSlots == nil {
+		return func() {}
+	}
+	h.integrationSlots <- struct{}{}
+	return func() { <-h.integrationSlots }
+}
 
 func (h *Handler) effectiveIngestTimeout() time.Duration {
 	if h.ingestTimeout > 0 {
@@ -293,6 +374,20 @@ func ingestTimeoutFromEnv() time.Duration {
 		return defaultIngestTimeout
 	}
 	return timeout
+}
+
+func maxConcurrentIntegrationsFromEnv() int {
+	raw := os.Getenv(maxConcurrentIntegrationsEnv)
+	if raw == "" {
+		return defaultMaxConcurrentIntegrations
+	}
+
+	maxConcurrent, err := strconv.Atoi(raw)
+	if err != nil || maxConcurrent <= 0 {
+		log.Printf("[api] invalid %s=%q, using default %d", maxConcurrentIntegrationsEnv, raw, defaultMaxConcurrentIntegrations)
+		return defaultMaxConcurrentIntegrations
+	}
+	return maxConcurrent
 }
 
 // runCompile executes a single compile cycle. Safe for concurrent use (serialized by compileMu).

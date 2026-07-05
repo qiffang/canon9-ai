@@ -69,6 +69,20 @@ func NewIngestAgentWithOptions(llm LLM, executor *ToolExecutor, opts RunnerOptio
 	return &IngestAgent{runner: NewRunnerWithOptions(llm, executor, opts)}
 }
 
+type llmTraceIDContextKey struct{}
+
+func contextWithLLMTraceID(ctx context.Context, traceID string) context.Context {
+	if traceID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, llmTraceIDContextKey{}, traceID)
+}
+
+func llmTraceID(ctx context.Context) string {
+	traceID, _ := ctx.Value(llmTraceIDContextKey{}).(string)
+	return traceID
+}
+
 // Remember processes a new piece of information and integrates it into the memory system.
 func (a *IngestAgent) Remember(ctx context.Context, text string, ctxInfo map[string]string) (string, error) {
 	userMsg := fmt.Sprintf("Remember this information:\n\n%s", text)
@@ -131,6 +145,7 @@ var IntegrateTools = []Tool{ToolReadWikiIndex, ToolReadWikiPage, ToolWriteWikiPa
 // Integrate takes an already-stored event and weaves it into the wiki.
 // This is designed to run asynchronously after the event has been synchronously recorded.
 func (a *IngestAgent) Integrate(ctx context.Context, eventID string, text string, ctxInfo map[string]string) error {
+	ctx = contextWithLLMTraceID(ctx, eventID)
 	userMsg := fmt.Sprintf("Event %s has been recorded with this content:\n\n%s", eventID, text)
 	if len(ctxInfo) > 0 {
 		ctxJSON, _ := json.Marshal(ctxInfo)

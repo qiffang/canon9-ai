@@ -46,8 +46,8 @@ type LLMRequest struct {
 
 // LLMResponse is the parsed LLM API response.
 type LLMResponse struct {
-	Content  []ContentBlock `json:"content"`
-	StopReason string       `json:"stop_reason"`
+	Content    []ContentBlock `json:"content"`
+	StopReason string         `json:"stop_reason"`
 }
 
 // LLM defines the interface for language model calls.
@@ -107,7 +107,7 @@ func (a *AnthropicLLM) Call(ctx context.Context, req LLMRequest) (*LLMResponse, 
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, redactCredentials(string(respBody)))
 	}
 
 	var llmResp LLMResponse

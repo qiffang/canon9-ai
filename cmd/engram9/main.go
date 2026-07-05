@@ -36,26 +36,59 @@ func runServe(args []string) {
 	model := flags.String("model", "", "LLM model name")
 	compileInterval := flags.Duration("compile-interval", 30*time.Minute, "auto-compile interval (0 to disable)")
 	maxToolLoops := flags.Int("max-tool-loops", agent.DefaultMaxToolLoops, "maximum LLM tool-use loop iterations per agent request")
+	ingestTimeout := flags.Duration("ingest-timeout", 0, "maximum duration for each async /remember wiki integration (0 uses ENGRAM9_INGEST_TIMEOUT/default)")
+	maxConcurrentIntegrations := flags.Int("max-concurrent-integrations", 0, "maximum concurrent async /remember wiki integrations (0 uses ENGRAM9_MAX_CONCURRENT_INTEGRATIONS/default)")
+	llmRetryAttempts := flags.Int("llm-retry-attempts", agent.DefaultLLMRetryAttempts, "maximum attempts for retryable LLM calls")
+	llmRetryBackoff := flags.Duration("llm-retry-backoff", agent.DefaultLLMRetryBackoff, "base exponential backoff for retryable LLM calls")
+	llmCallTimeout := flags.Duration("llm-call-timeout", agent.DefaultLLMCallTimeout, "per-attempt timeout for each LLM API call (0 disables per-attempt timeout)")
 	_ = flags.Parse(args)
 
 	var llm agent.LLM
+	llmProvider := "anthropic"
+	llmModel := ""
+	llmBaseURL := ""
 	switch os.Getenv("LLM_PROVIDER") {
 	case "openai":
 		if os.Getenv("OPENAI_API_KEY") == "" {
 			fmt.Fprintln(os.Stderr, "error: OPENAI_API_KEY environment variable is required when LLM_PROVIDER=openai")
 			os.Exit(1)
 		}
-		llm = agent.NewOpenAILLM(*model)
-		log.Printf("using OpenAI-compatible provider (base: %s)", os.Getenv("OPENAI_BASE_URL"))
+		openAILLM := agent.NewOpenAILLM(*model)
+		llm = openAILLM
+		llmProvider = "openai"
+		llmModel = openAILLM.Model
+		llmBaseURL = openAILLM.BaseURL
+		log.Printf("using OpenAI-compatible provider (base: %s, model: %s)", llmBaseURL, llmModel)
 	default:
 		if os.Getenv("ANTHROPIC_API_KEY") == "" {
 			fmt.Fprintln(os.Stderr, "error: ANTHROPIC_API_KEY environment variable is required")
 			os.Exit(1)
 		}
-		llm = agent.NewAnthropicLLM(*model)
-		log.Print("using Anthropic provider")
+		anthropicLLM := agent.NewAnthropicLLM(*model)
+		llm = anthropicLLM
+		llmModel = anthropicLLM.Model
+		log.Printf("using Anthropic provider (model: %s)", llmModel)
 	}
-	handler, err := api.NewWithOptions(*dataDir, llm, api.Options{MaxToolLoops: *maxToolLoops})
+	retryAttempts := *llmRetryAttempts
+	if retryAttempts <= 0 {
+		retryAttempts = 1
+	}
+	llm = agent.NewRetryLLM(llm, agent.RetryOptions{
+		MaxAttempts:       retryAttempts,
+		BaseDelay:         *llmRetryBackoff,
+		PerAttemptTimeout: *llmCallTimeout,
+	})
+	handler, err := api.NewWithOptions(*dataDir, llm, api.Options{
+		MaxToolLoops:              *maxToolLoops,
+		IngestTimeout:             *ingestTimeout,
+		MaxConcurrentIntegrations: *maxConcurrentIntegrations,
+		LLMRetryAttempts:          retryAttempts,
+		LLMRetryBackoff:           *llmRetryBackoff,
+		LLMCallTimeout:            *llmCallTimeout,
+		LLMProvider:               llmProvider,
+		LLMModel:                  llmModel,
+		LLMBaseURL:                llmBaseURL,
+	})
 	if err != nil {
 		log.Fatalf("init: %v", err)
 	}
@@ -65,6 +98,16 @@ func runServe(args []string) {
 	}
 
 	log.Printf("engram9 listening on %s (data: %s)", *addr, *dataDir)
+	log.Printf("engram9 runtime: max_tool_loops=%d ingest_timeout=%s max_concurrent_integrations=%d llm_provider=%s llm_model=%s llm_retry_attempts=%d llm_retry_backoff=%s llm_call_timeout=%s",
+		handler.MaxToolLoops(),
+		handler.EffectiveIngestTimeout(),
+		handler.MaxConcurrentIntegrations(),
+		llmProvider,
+		llmModel,
+		retryAttempts,
+		*llmRetryBackoff,
+		*llmCallTimeout,
+	)
 	if err := http.ListenAndServe(*addr, handler.Routes()); err != nil {
 		log.Fatalf("serve: %v", err)
 	}

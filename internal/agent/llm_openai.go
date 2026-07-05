@@ -44,11 +44,11 @@ type oaiRequest struct {
 }
 
 type oaiMessage struct {
-	Role       string          `json:"role"`
-	Content    string          `json:"content,omitempty"`
-	ToolCalls  []oaiToolCall   `json:"tool_calls,omitempty"`
-	ToolCallID string          `json:"tool_call_id,omitempty"`
-	Name       string          `json:"name,omitempty"`
+	Role       string        `json:"role"`
+	Content    string        `json:"content,omitempty"`
+	ToolCalls  []oaiToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string        `json:"tool_call_id,omitempty"`
+	Name       string        `json:"name,omitempty"`
 }
 
 type oaiTool struct {
@@ -150,7 +150,7 @@ func (o *OpenAILLM) Call(ctx context.Context, req LLMRequest) (*LLMResponse, err
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, redactCredentials(string(respBody)))
 	}
 
 	var oaiResp oaiResponse
