@@ -7,7 +7,11 @@ import (
 	"log"
 )
 
-const maxToolLoops = 20
+const DefaultMaxToolLoops = 80
+
+type RunnerOptions struct {
+	MaxToolLoops int
+}
 
 // ToolCallback is called after each tool execution with the tool name and result.
 type ToolCallback func(name string, input json.RawMessage, result string, err error)
@@ -15,12 +19,21 @@ type ToolCallback func(name string, input json.RawMessage, result string, err er
 // Runner drives an agentic tool-use loop: send messages to LLM, execute tool calls,
 // feed results back, repeat until the LLM produces a final text response.
 type Runner struct {
-	llm      LLM
-	executor *ToolExecutor
+	llm          LLM
+	executor     *ToolExecutor
+	maxToolLoops int
 }
 
 func NewRunner(llm LLM, executor *ToolExecutor) *Runner {
-	return &Runner{llm: llm, executor: executor}
+	return NewRunnerWithOptions(llm, executor, RunnerOptions{})
+}
+
+func NewRunnerWithOptions(llm LLM, executor *ToolExecutor, opts RunnerOptions) *Runner {
+	maxToolLoops := opts.MaxToolLoops
+	if maxToolLoops <= 0 {
+		maxToolLoops = DefaultMaxToolLoops
+	}
+	return &Runner{llm: llm, executor: executor, maxToolLoops: maxToolLoops}
 }
 
 // Run executes an agent with the given system prompt, tools, and user message.
@@ -39,7 +52,7 @@ func (r *Runner) RunWithCallback(ctx context.Context, system string, tools []Too
 
 	var records []ToolCallRecord
 
-	for i := 0; i < maxToolLoops; i++ {
+	for i := 0; i < r.maxToolLoops; i++ {
 		resp, err := r.llm.Call(ctx, LLMRequest{
 			System:   system,
 			Messages: messages,
@@ -105,7 +118,7 @@ func (r *Runner) RunWithCallback(ctx context.Context, system string, tools []Too
 		})
 	}
 
-	return "", records, fmt.Errorf("exceeded max tool loops (%d)", maxToolLoops)
+	return "", records, fmt.Errorf("exceeded max tool loops (%d)", r.maxToolLoops)
 }
 
 // ToolCallRecord stores a single tool invocation and its result.

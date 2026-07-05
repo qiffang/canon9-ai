@@ -35,6 +35,7 @@ func runServe(args []string) {
 	dataDir := flags.String("data", "./data", "data directory")
 	model := flags.String("model", "", "LLM model name")
 	compileInterval := flags.Duration("compile-interval", 30*time.Minute, "auto-compile interval (0 to disable)")
+	maxToolLoops := flags.Int("max-tool-loops", agent.DefaultMaxToolLoops, "maximum LLM tool-use loop iterations per agent request")
 	_ = flags.Parse(args)
 
 	var llm agent.LLM
@@ -54,7 +55,7 @@ func runServe(args []string) {
 		llm = agent.NewAnthropicLLM(*model)
 		log.Print("using Anthropic provider")
 	}
-	handler, err := api.New(*dataDir, llm)
+	handler, err := api.NewWithOptions(*dataDir, llm, api.Options{MaxToolLoops: *maxToolLoops})
 	if err != nil {
 		log.Fatalf("init: %v", err)
 	}

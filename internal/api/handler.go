@@ -42,21 +42,35 @@ const (
 	ingestTimeoutEnv     = "ENGRAM9_INGEST_TIMEOUT"
 )
 
+type Options struct {
+	MaxToolLoops  int
+	IngestTimeout time.Duration
+}
+
 // New creates a new API handler with all agents wired up.
 func New(dataDir string, llm agent.LLM) (*Handler, error) {
+	return NewWithOptions(dataDir, llm, Options{})
+}
+
+func NewWithOptions(dataDir string, llm agent.LLM, opts Options) (*Handler, error) {
 	store, err := storage.NewFS(dataDir)
 	if err != nil {
 		return nil, err
 	}
 
 	executor := agent.NewToolExecutor(store)
+	runnerOpts := agent.RunnerOptions{MaxToolLoops: opts.MaxToolLoops}
+	ingestTimeout := opts.IngestTimeout
+	if ingestTimeout <= 0 {
+		ingestTimeout = ingestTimeoutFromEnv()
+	}
 
 	return &Handler{
 		store:         store,
-		ingest:        agent.NewIngestAgent(llm, executor),
-		query:         agent.NewQueryAgent(llm, executor),
-		compile:       agent.NewCompileAgent(llm, executor),
-		ingestTimeout: ingestTimeoutFromEnv(),
+		ingest:        agent.NewIngestAgentWithOptions(llm, executor, runnerOpts),
+		query:         agent.NewQueryAgentWithOptions(llm, executor, runnerOpts),
+		compile:       agent.NewCompileAgentWithOptions(llm, executor, runnerOpts),
+		ingestTimeout: ingestTimeout,
 	}, nil
 }
 

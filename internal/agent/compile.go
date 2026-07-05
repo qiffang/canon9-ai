@@ -90,8 +90,12 @@ type CompileAgent struct {
 }
 
 func NewCompileAgent(llm LLM, executor *ToolExecutor) *CompileAgent {
+	return NewCompileAgentWithOptions(llm, executor, RunnerOptions{})
+}
+
+func NewCompileAgentWithOptions(llm LLM, executor *ToolExecutor, opts RunnerOptions) *CompileAgent {
 	return &CompileAgent{
-		runner:   NewRunner(llm, executor),
+		runner:   NewRunnerWithOptions(llm, executor, opts),
 		executor: executor,
 	}
 }
