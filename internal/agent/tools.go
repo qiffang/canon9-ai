@@ -65,6 +65,15 @@ func (te *ToolExecutor) readEventsSince(input json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Truncate event content to avoid exceeding LLM API per-message size limits.
+	// Integrations already processed full content into wiki pages; compile only
+	// needs metadata and a summary to do cross-referencing and index rebuild.
+	const maxContentLen = 2000
+	for i := range page.Events {
+		if len(page.Events[i].Content) > maxContentLen {
+			page.Events[i].Content = page.Events[i].Content[:maxContentLen] + "\n... [truncated for compile]"
+		}
+	}
 	data, _ := json.Marshal(page)
 	return string(data), nil
 }
