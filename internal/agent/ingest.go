@@ -62,7 +62,11 @@ type IngestAgent struct {
 }
 
 func NewIngestAgent(llm LLM, executor *ToolExecutor) *IngestAgent {
-	return &IngestAgent{runner: NewRunner(llm, executor)}
+	return NewIngestAgentWithOptions(llm, executor, RunnerOptions{})
+}
+
+func NewIngestAgentWithOptions(llm LLM, executor *ToolExecutor, opts RunnerOptions) *IngestAgent {
+	return &IngestAgent{runner: NewRunnerWithOptions(llm, executor, opts)}
 }
 
 // Remember processes a new piece of information and integrates it into the memory system.

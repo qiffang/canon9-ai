@@ -54,7 +54,11 @@ type QueryAgent struct {
 }
 
 func NewQueryAgent(llm LLM, executor *ToolExecutor) *QueryAgent {
-	return &QueryAgent{runner: NewRunner(llm, executor)}
+	return NewQueryAgentWithOptions(llm, executor, RunnerOptions{})
+}
+
+func NewQueryAgentWithOptions(llm LLM, executor *ToolExecutor, opts RunnerOptions) *QueryAgent {
+	return &QueryAgent{runner: NewRunnerWithOptions(llm, executor, opts)}
 }
 
 // Recall answers a question by reconstructing knowledge from the memory system.
