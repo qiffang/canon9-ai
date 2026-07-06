@@ -7,11 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/qiffang/engram9/internal/agent"
-	"github.com/qiffang/engram9/internal/storage"
 )
 
 // mockLLM returns a canned response for testing without real API calls.
@@ -30,19 +30,21 @@ func (m *mockLLM) Call(_ context.Context, req agent.LLMRequest) (*agent.LLMRespo
 
 func newTestHandler(t *testing.T) *Handler {
 	t.Helper()
-	dir := t.TempDir()
-	store, err := storage.NewFS(dir)
+	llm := &mockLLM{response: "Memory stored successfully."}
+	h, err := NewWithOptions(t.TempDir(), llm, Options{
+		IngestTimeout:             time.Second,
+		MaxConcurrentIntegrations: defaultMaxConcurrentIntegrations,
+		LLMRetryAttempts:          agent.DefaultLLMRetryAttempts,
+		LLMRetryBackoff:           agent.DefaultLLMRetryBackoff,
+		LLMCallTimeout:            agent.DefaultLLMCallTimeout,
+		LLMProvider:               "test",
+		LLMModel:                  "mock-model",
+		LLMBaseURL:                "https://example.invalid/v1",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	llm := &mockLLM{response: "Memory stored successfully."}
-	executor := agent.NewToolExecutor(store)
-	return &Handler{
-		store:   store,
-		ingest:  agent.NewIngestAgent(llm, executor),
-		query:   agent.NewQueryAgent(llm, executor),
-		compile: agent.NewCompileAgent(llm, executor),
-	}
+	return h
 }
 
 func TestIngestTimeoutFromEnv(t *testing.T) {
@@ -63,6 +65,29 @@ func TestIngestTimeoutFromEnv(t *testing.T) {
 			t.Setenv(ingestTimeoutEnv, tt.value)
 			if got := ingestTimeoutFromEnv(); got != tt.want {
 				t.Fatalf("ingestTimeoutFromEnv()=%s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMaxConcurrentIntegrationsFromEnv(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  int
+	}{
+		{name: "default", value: "", want: defaultMaxConcurrentIntegrations},
+		{name: "configured", value: "2", want: 2},
+		{name: "invalid", value: "many", want: defaultMaxConcurrentIntegrations},
+		{name: "zero", value: "0", want: defaultMaxConcurrentIntegrations},
+		{name: "negative", value: "-1", want: defaultMaxConcurrentIntegrations},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(maxConcurrentIntegrationsEnv, tt.value)
+			if got := maxConcurrentIntegrationsFromEnv(); got != tt.want {
+				t.Fatalf("maxConcurrentIntegrationsFromEnv()=%d, want %d", got, tt.want)
 			}
 		})
 	}
@@ -170,6 +195,33 @@ func TestStatusEndpoint(t *testing.T) {
 	var stats StatusResponse
 	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
 		t.Fatal(err)
+	}
+	if stats.IngestTimeout != h.EffectiveIngestTimeout().String() {
+		t.Fatalf("ingest_timeout=%q, want %q", stats.IngestTimeout, h.EffectiveIngestTimeout().String())
+	}
+	if stats.MaxConcurrentIntegrations != h.MaxConcurrentIntegrations() {
+		t.Fatalf("max_concurrent_integrations=%d, want %d", stats.MaxConcurrentIntegrations, h.MaxConcurrentIntegrations())
+	}
+	if stats.MaxToolLoops != h.MaxToolLoops() {
+		t.Fatalf("max_tool_loops=%d, want %d", stats.MaxToolLoops, h.MaxToolLoops())
+	}
+	if stats.LLMRetryAttempts != agent.DefaultLLMRetryAttempts {
+		t.Fatalf("llm_retry_attempts=%d, want %d", stats.LLMRetryAttempts, agent.DefaultLLMRetryAttempts)
+	}
+	if stats.LLMRetryBackoff != agent.DefaultLLMRetryBackoff.String() {
+		t.Fatalf("llm_retry_backoff=%q, want %q", stats.LLMRetryBackoff, agent.DefaultLLMRetryBackoff.String())
+	}
+	if stats.LLMCallTimeout != agent.DefaultLLMCallTimeout.String() {
+		t.Fatalf("llm_call_timeout=%q, want %q", stats.LLMCallTimeout, agent.DefaultLLMCallTimeout.String())
+	}
+	if stats.LLMProvider != "test" {
+		t.Fatalf("llm_provider=%q, want test", stats.LLMProvider)
+	}
+	if stats.LLMModel != "mock-model" {
+		t.Fatalf("llm_model=%q, want mock-model", stats.LLMModel)
+	}
+	if stats.LLMBaseURL != "https://example.invalid/v1" {
+		t.Fatalf("llm_base_url=%q, want https://example.invalid/v1", stats.LLMBaseURL)
 	}
 }
 
@@ -365,18 +417,12 @@ func (f *failingLLM) Call(_ context.Context, _ agent.LLMRequest) (*agent.LLMResp
 }
 
 func TestIngestErrorCountIncrementsOnFailure(t *testing.T) {
-	dir := t.TempDir()
-	store, err := storage.NewFS(dir)
+	h, err := NewWithOptions(t.TempDir(), &failingLLM{}, Options{
+		IngestTimeout:             time.Second,
+		MaxConcurrentIntegrations: 1,
+	})
 	if err != nil {
 		t.Fatal(err)
-	}
-	llm := &failingLLM{}
-	executor := agent.NewToolExecutor(store)
-	h := &Handler{
-		store:   store,
-		ingest:  agent.NewIngestAgent(llm, executor),
-		query:   agent.NewQueryAgent(llm, executor),
-		compile: agent.NewCompileAgent(llm, executor),
 	}
 	srv := httptest.NewServer(h.Routes())
 	defer srv.Close()
@@ -398,6 +444,76 @@ func TestIngestErrorCountIncrementsOnFailure(t *testing.T) {
 
 	if got := h.ingestErrors.Load(); got != 1 {
 		t.Fatalf("ingest_error_count=%d, want 1", got)
+	}
+}
+
+type activeCountingLLM struct {
+	delay     time.Duration
+	active    atomic.Int64
+	maxActive atomic.Int64
+}
+
+func (m *activeCountingLLM) Call(ctx context.Context, _ agent.LLMRequest) (*agent.LLMResponse, error) {
+	active := m.active.Add(1)
+	m.recordMaxActive(active)
+	defer m.active.Add(-1)
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(m.delay):
+	}
+
+	return &agent.LLMResponse{
+		Content: []agent.ContentBlock{
+			{Type: "text", Text: "Memory stored successfully."},
+		},
+		StopReason: "end_turn",
+	}, nil
+}
+
+func (m *activeCountingLLM) recordMaxActive(active int64) {
+	for {
+		maxActive := m.maxActive.Load()
+		if active <= maxActive || m.maxActive.CompareAndSwap(maxActive, active) {
+			return
+		}
+	}
+}
+
+func TestRememberLimitsConcurrentIntegrations(t *testing.T) {
+	llm := &activeCountingLLM{delay: 20 * time.Millisecond}
+	h, err := NewWithOptions(t.TempDir(), llm, Options{
+		IngestTimeout:             time.Second,
+		MaxConcurrentIntegrations: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(h.Routes())
+	defer srv.Close()
+	defer h.Wait()
+
+	for i := 0; i < 3; i++ {
+		resp, err := http.Post(srv.URL+"/remember",
+			"application/json",
+			strings.NewReader(fmt.Sprintf(`{"text":"event %d"}`, i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status=%d, want 200", resp.StatusCode)
+		}
+	}
+
+	h.Wait()
+
+	if got := llm.maxActive.Load(); got != 1 {
+		t.Fatalf("max active integrations=%d, want 1", got)
+	}
+	if got := h.ingestErrors.Load(); got != 0 {
+		t.Fatalf("ingest_error_count=%d, want 0", got)
 	}
 }
 
