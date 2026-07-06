@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -87,6 +88,39 @@ func TestRetryLLMDoesNotRetryNonRetryableError(t *testing.T) {
 			}
 			if base.calls != 1 {
 				t.Fatalf("calls=%d, want 1", base.calls)
+			}
+		})
+	}
+}
+
+func TestRetryLLMRetriesTransportErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "EOF", err: errors.New("http call: Post \"https://api.openai.com/v1/chat/completions\": EOF")},
+		{name: "unexpected EOF", err: errors.New("unexpected EOF")},
+		{name: "connection reset", err: errors.New("read: connection reset by peer")},
+		{name: "connection refused", err: errors.New("dial tcp 127.0.0.1:443: connection refused")},
+		{name: "broken pipe", err: errors.New("write: broken pipe")},
+		{name: "io.EOF", err: io.EOF},
+		{name: "io.ErrUnexpectedEOF", err: io.ErrUnexpectedEOF},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := &retryTestLLM{errs: []error{tt.err}}
+			llm := NewRetryLLM(base, RetryOptions{MaxAttempts: 2})
+
+			resp, err := llm.Call(context.Background(), LLMRequest{})
+			if err != nil {
+				t.Fatalf("expected success after retry, got error: %v", err)
+			}
+			if ExtractText(resp.Content) != "ok" {
+				t.Fatalf("response=%q, want ok", ExtractText(resp.Content))
+			}
+			if base.calls != 2 {
+				t.Fatalf("calls=%d, want 2 (first fail, then succeed)", base.calls)
 			}
 		})
 	}
