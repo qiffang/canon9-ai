@@ -182,6 +182,32 @@ See [docs](../../docs/okf-compatibility.md).
 	}
 }
 
+func TestValidateBundleToleratesRepoSourceAnchorLinks(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "semantic/a.md", `---
+type: concept
+title: "A"
+description: "A page"
+timestamp: "2026-06-16T12:00:00Z"
+memory_type: semantic
+source_events:
+  - evt_001
+trust_tier: T1
+---
+# A
+
+See [InsertLLMUsage](drive9:3afa6925ec93846b7fcc057491db585a25c8d576:pkg/meta/llm_usage.go:12:*Store.InsertLLMUsage) and [deleted](drive9:3afa6925ec93846b7fcc057491db585a25c8d576:pkg/meta/old.go:deleted).
+`)
+
+	result, err := ValidateBundle(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Issues) != 0 {
+		t.Fatalf("repo source anchors should not be treated as internal wiki links: %#v", result.Issues)
+	}
+}
+
 func TestValidateBundleStructuralIndexNoFrontmatter(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "index.md", "# Index\n\n- [A](semantic/a.md)\n")
