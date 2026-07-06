@@ -142,6 +142,57 @@ func TestMigrateLegacyMarkdownEscapesSpaceDestinations(t *testing.T) {
 	}
 }
 
+func TestMigrateLegacyBundleRemovesBrokenInternalMarkdownLinks(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "semantic/code/drive9/pkg/server.md", `---
+type: concept
+title: "Server"
+description: "Server package."
+timestamp: "2026-06-16T12:00:00Z"
+memory_type: semantic
+source_events:
+  - evt_001
+trust_tier: T2
+---
+# Server
+
+The server collaborates with [tenant](tenant.md), [existing](existing.md), and [source](drive9:3afa6925ec93846b7fcc057491db585a25c8d576:pkg/server/server.go:10:Server).
+
+Inline code `+"`[tenant](tenant.md)`"+` stays literal.
+`)
+	writeFile(t, root, "semantic/code/drive9/pkg/existing.md", validOKFPage("concept", "Existing", "semantic"))
+
+	result, err := MigrateLegacyBundle(root, MigrationOptions{Write: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ChangedCount() != 1 {
+		t.Fatalf("ChangedCount=%d, want 1; result=%#v", result.ChangedCount(), result)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "semantic/code/drive9/pkg/server.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if strings.Contains(got, "with [tenant](tenant.md)") {
+		t.Fatalf("broken internal markdown link should be plain text:\n%s", got)
+	}
+	if !strings.Contains(got, "with tenant, [existing](existing.md), and [source](drive9:3afa6925ec93846b7fcc057491db585a25c8d576:pkg/server/server.go:10:Server)") {
+		t.Fatalf("valid internal/source links should be preserved:\n%s", got)
+	}
+	if !strings.Contains(got, "`[tenant](tenant.md)`") {
+		t.Fatalf("inline-code link should be preserved:\n%s", got)
+	}
+
+	validateResult, err := ValidateBundle(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(validateResult.Issues) != 0 {
+		t.Fatalf("repaired bundle should validate strictly: %#v", validateResult.Issues)
+	}
+}
+
 func TestMigrateLegacyBundleDryRunWriteBackupAndCheck(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "semantic/a.md", "<!-- compiled_from: evt_001 -->\n# A\n\nSee [[procedural/b]].\n")
