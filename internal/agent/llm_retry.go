@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"strings"
@@ -104,6 +105,9 @@ func isRetryableLLMError(err error) bool {
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return true
 	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
 	msg := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(msg, "context deadline exceeded"):
@@ -111,6 +115,14 @@ func isRetryableLLMError(err error) bool {
 	case strings.Contains(msg, "timeout"):
 		return true
 	case strings.Contains(msg, "temporary"):
+		return true
+	case strings.Contains(msg, "eof"):
+		return true
+	case strings.Contains(msg, "connection reset"):
+		return true
+	case strings.Contains(msg, "connection refused"):
+		return true
+	case strings.Contains(msg, "broken pipe"):
 		return true
 	case strings.Contains(msg, "api error 429"):
 		return true
