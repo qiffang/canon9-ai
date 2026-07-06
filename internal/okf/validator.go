@@ -52,6 +52,7 @@ func (r Result) WarningCount() int {
 }
 
 var markdownLinkRE = regexp.MustCompile(`!?\[[^\]]*\]\(([^)]*)\)`)
+var repoSourceAnchorLinkRE = regexp.MustCompile(`^[^\s:]+:[0-9a-fA-F]{40}:.+:(deleted|[0-9]+:.+)$`)
 
 var allowedMemoryTypes = map[string]bool{
 	"semantic":    true,
@@ -303,6 +304,9 @@ func validateLinks(root, pageDir, rel string, body string) []Issue {
 		if link == "" || isExternalLink(link) {
 			continue
 		}
+		if isRepoSourceAnchor(link) {
+			continue
+		}
 		link = strings.Split(link, "#")[0]
 		link = strings.Split(link, "?")[0]
 		link = decodeMarkdownDestinationPath(link)
@@ -417,6 +421,10 @@ func isExternalLink(link string) bool {
 		strings.HasPrefix(lower, "mailto:") ||
 		strings.HasPrefix(lower, "tel:") ||
 		strings.HasPrefix(lower, "#")
+}
+
+func isRepoSourceAnchor(link string) bool {
+	return repoSourceAnchorLinkRE.MatchString(link)
 }
 
 func isWithin(root, target string) bool {
