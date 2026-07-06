@@ -158,6 +158,8 @@ trust_tier: T2
 
 The server collaborates with [tenant](tenant.md), [existing](existing.md), and [source](drive9:3afa6925ec93846b7fcc057491db585a25c8d576:pkg/server/server.go:10:Server).
 
+![diagram](missing-image.png)
+
 Inline code `+"`[tenant](tenant.md)`"+` stays literal.
 `)
 	writeFile(t, root, "semantic/code/drive9/pkg/existing.md", validOKFPage("concept", "Existing", "semantic"))
@@ -182,6 +184,9 @@ Inline code `+"`[tenant](tenant.md)`"+` stays literal.
 	}
 	if !strings.Contains(got, "`[tenant](tenant.md)`") {
 		t.Fatalf("inline-code link should be preserved:\n%s", got)
+	}
+	if !strings.Contains(got, "![diagram](missing-image.png)") {
+		t.Fatalf("image links should be preserved:\n%s", got)
 	}
 
 	validateResult, err := ValidateBundle(root, true)

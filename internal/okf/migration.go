@@ -582,7 +582,7 @@ func normalizeBrokenMarkdownLinksInText(root, rel, text string) string {
 	for _, match := range matches {
 		fullStart := match[0]
 		fullEnd := match[1]
-		if fullStart > 0 && text[fullStart-1] == '!' {
+		if text[fullStart] == '!' {
 			continue
 		}
 		if !isBrokenBundleMarkdownLink(root, rel, text[match[2]:match[3]]) {
