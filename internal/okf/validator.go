@@ -296,7 +296,7 @@ func validateLinks(root, pageDir, rel string, body string) []Issue {
 	issues := make([]Issue, 0)
 	for _, match := range matches {
 		fullStart := match[0]
-		if fullStart > 0 && body[fullStart-1] == '!' {
+		if body[fullStart] == '!' {
 			continue
 		}
 		link := body[match[2]:match[3]]

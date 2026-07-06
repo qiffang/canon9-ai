@@ -96,6 +96,12 @@ func migrateFile(root, path, rel string, opts MigrationOptions) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("%s: %w", rel, err)
 	}
+	normalized, normalizedChanged, err := normalizeMarkdownLinksInPage(root, rel, migrated)
+	if err != nil {
+		return false, fmt.Errorf("%s: %w", rel, err)
+	}
+	migrated = normalized
+	changed = changed || normalizedChanged
 	if !changed || !opts.Write {
 		return changed, nil
 	}
@@ -442,6 +448,43 @@ func convertWikiLinks(root, rel, body string) string {
 	return strings.Join(out, "\n")
 }
 
+func normalizeMarkdownLinksInPage(root, rel, content string) (string, bool, error) {
+	_, body, hasFrontmatter, err := parseFrontmatter(content)
+	if err != nil {
+		return "", false, err
+	}
+	if !hasFrontmatter {
+		normalized := normalizeMarkdownLinks(root, rel, content)
+		return normalized, normalized != content, nil
+	}
+	prefix, _, err := splitFrontmatterRaw(content)
+	if err != nil {
+		return "", false, err
+	}
+	normalizedBody := normalizeMarkdownLinks(root, rel, body)
+	normalized := prefix + normalizedBody
+	return normalized, normalized != content, nil
+}
+
+func normalizeMarkdownLinks(root, rel, body string) string {
+	var out []string
+	inFence := false
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
+			inFence = !inFence
+			out = append(out, line)
+			continue
+		}
+		if inFence {
+			out = append(out, line)
+			continue
+		}
+		out = append(out, normalizeMarkdownLinksOutsideInlineCode(root, rel, line))
+	}
+	return strings.Join(out, "\n")
+}
+
 func convertWikiLinksOutsideInlineCode(root, rel, line string) string {
 	var b strings.Builder
 	for i := 0; i < len(line); {
@@ -462,6 +505,31 @@ func convertWikiLinksOutsideInlineCode(root, rel, line string) string {
 			segmentEnd = i + next
 		}
 		b.WriteString(convertWikiLinksInText(root, rel, line[i:segmentEnd]))
+		i = segmentEnd
+	}
+	return b.String()
+}
+
+func normalizeMarkdownLinksOutsideInlineCode(root, rel, line string) string {
+	var b strings.Builder
+	for i := 0; i < len(line); {
+		if line[i] == '`' {
+			run := countBackticks(line[i:])
+			end := findMatchingBackticks(line, i+run, run)
+			if end < 0 {
+				b.WriteString(line[i:])
+				break
+			}
+			b.WriteString(line[i : end+run])
+			i = end + run
+			continue
+		}
+		next := strings.IndexByte(line[i:], '`')
+		segmentEnd := len(line)
+		if next >= 0 {
+			segmentEnd = i + next
+		}
+		b.WriteString(normalizeBrokenMarkdownLinksInText(root, rel, line[i:segmentEnd]))
 		i = segmentEnd
 	}
 	return b.String()
@@ -502,6 +570,69 @@ func convertWikiLinksInText(root, rel, text string) string {
 		href := markdownHrefForWikiTarget(root, rel, target)
 		return "[" + escapeMarkdownLinkText(label) + "](" + href + ")"
 	})
+}
+
+func normalizeBrokenMarkdownLinksInText(root, rel, text string) string {
+	matches := markdownLinkRE.FindAllStringSubmatchIndex(text, -1)
+	if len(matches) == 0 {
+		return text
+	}
+	var b strings.Builder
+	last := 0
+	for _, match := range matches {
+		fullStart := match[0]
+		fullEnd := match[1]
+		if text[fullStart] == '!' {
+			continue
+		}
+		if !isBrokenBundleMarkdownLink(root, rel, text[match[2]:match[3]]) {
+			continue
+		}
+		label := markdownLinkLabel(text[fullStart:fullEnd])
+		b.WriteString(text[last:fullStart])
+		b.WriteString(label)
+		last = fullEnd
+	}
+	if last == 0 {
+		return text
+	}
+	b.WriteString(text[last:])
+	return b.String()
+}
+
+func markdownLinkLabel(markdown string) string {
+	if !strings.HasPrefix(markdown, "[") {
+		return markdown
+	}
+	end := strings.Index(markdown, "](")
+	if end < 0 {
+		return markdown
+	}
+	label := strings.TrimSpace(markdown[1:end])
+	if label == "" {
+		return markdown
+	}
+	return label
+}
+
+func isBrokenBundleMarkdownLink(root, rel, rawDestination string) bool {
+	link := markdownLinkDestination(rawDestination)
+	if link == "" || isExternalLink(link) || isRepoSourceAnchor(link) {
+		return false
+	}
+	link = strings.Split(link, "#")[0]
+	link = strings.Split(link, "?")[0]
+	link = decodeMarkdownDestinationPath(link)
+	if link == "" || filepath.IsAbs(link) {
+		return false
+	}
+	fromDir := filepath.Dir(filepath.Join(root, filepath.FromSlash(rel)))
+	target := filepath.Clean(filepath.Join(fromDir, filepath.FromSlash(link)))
+	if !isWithin(root, target) {
+		return false
+	}
+	_, err := os.Stat(target)
+	return os.IsNotExist(err)
 }
 
 func markdownHrefForWikiTarget(root, rel, target string) string {

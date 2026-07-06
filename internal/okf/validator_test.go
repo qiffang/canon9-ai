@@ -182,6 +182,32 @@ See [docs](../../docs/okf-compatibility.md).
 	}
 }
 
+func TestValidateBundleIgnoresImageLinks(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "semantic/a.md", `---
+type: concept
+title: "A"
+description: "A page"
+timestamp: "2026-06-16T12:00:00Z"
+memory_type: semantic
+source_events:
+  - evt_001
+trust_tier: T1
+---
+# A
+
+![diagram](missing-image.png)
+`)
+
+	result, err := ValidateBundle(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Issues) != 0 {
+		t.Fatalf("image links should not be treated as internal wiki links: %#v", result.Issues)
+	}
+}
+
 func TestValidateBundleToleratesRepoSourceAnchorLinks(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "semantic/a.md", `---
