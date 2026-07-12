@@ -69,6 +69,10 @@ func main() {
 	case "consumption", "":
 		serverMode = mcp.ModeConsumption
 	case "agent":
+		if *bundleDir != "" {
+			fmt.Fprintln(os.Stderr, "error: -mode agent requires -data (read-write store); -bundle is read-only")
+			os.Exit(1)
+		}
 		serverMode = mcp.ModeAgent
 	default:
 		fmt.Fprintf(os.Stderr, "error: unknown mode %q (use 'consumption' or 'agent')\n", *mode)
