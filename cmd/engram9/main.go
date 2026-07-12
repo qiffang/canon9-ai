@@ -36,6 +36,8 @@ func runServe(args []string) {
 	model := flags.String("model", "", "LLM model name")
 	compileInterval := flags.Duration("compile-interval", 30*time.Minute, "auto-compile interval (0 to disable)")
 	maxToolLoops := flags.Int("max-tool-loops", agent.DefaultMaxToolLoops, "maximum LLM tool-use loop iterations per agent request")
+	maxRepeatedReadOnlyToolCalls := flags.Int("max-repeated-read-only-tool-calls", agent.DefaultMaxRepeatedReadOnlyToolCalls, "maximum consecutive identical read-only tool calls per agent request")
+	maxInvalidToolCalls := flags.Int("max-invalid-tool-calls", agent.DefaultMaxInvalidToolCalls, "maximum consecutive invalid tool calls per agent request")
 	ingestTimeout := flags.Duration("ingest-timeout", 0, "maximum duration for each async /remember wiki integration (0 uses ENGRAM9_INGEST_TIMEOUT/default)")
 	maxConcurrentIntegrations := flags.Int("max-concurrent-integrations", 0, "maximum concurrent async /remember wiki integrations (0 uses ENGRAM9_MAX_CONCURRENT_INTEGRATIONS/default)")
 	llmRetryAttempts := flags.Int("llm-retry-attempts", agent.DefaultLLMRetryAttempts, "maximum attempts for retryable LLM calls")
@@ -79,15 +81,17 @@ func runServe(args []string) {
 		PerAttemptTimeout: *llmCallTimeout,
 	})
 	handler, err := api.NewWithOptions(*dataDir, llm, api.Options{
-		MaxToolLoops:              *maxToolLoops,
-		IngestTimeout:             *ingestTimeout,
-		MaxConcurrentIntegrations: *maxConcurrentIntegrations,
-		LLMRetryAttempts:          retryAttempts,
-		LLMRetryBackoff:           *llmRetryBackoff,
-		LLMCallTimeout:            *llmCallTimeout,
-		LLMProvider:               llmProvider,
-		LLMModel:                  llmModel,
-		LLMBaseURL:                llmBaseURL,
+		MaxToolLoops:                 *maxToolLoops,
+		MaxRepeatedReadOnlyToolCalls: *maxRepeatedReadOnlyToolCalls,
+		MaxInvalidToolCalls:          *maxInvalidToolCalls,
+		IngestTimeout:                *ingestTimeout,
+		MaxConcurrentIntegrations:    *maxConcurrentIntegrations,
+		LLMRetryAttempts:             retryAttempts,
+		LLMRetryBackoff:              *llmRetryBackoff,
+		LLMCallTimeout:               *llmCallTimeout,
+		LLMProvider:                  llmProvider,
+		LLMModel:                     llmModel,
+		LLMBaseURL:                   llmBaseURL,
 	})
 	if err != nil {
 		log.Fatalf("init: %v", err)
@@ -98,8 +102,10 @@ func runServe(args []string) {
 	}
 
 	log.Printf("engram9 listening on %s (data: %s)", *addr, *dataDir)
-	log.Printf("engram9 runtime: max_tool_loops=%d ingest_timeout=%s max_concurrent_integrations=%d llm_provider=%s llm_model=%s llm_retry_attempts=%d llm_retry_backoff=%s llm_call_timeout=%s",
+	log.Printf("engram9 runtime: max_tool_loops=%d max_repeated_read_only_tool_calls=%d max_invalid_tool_calls=%d ingest_timeout=%s max_concurrent_integrations=%d llm_provider=%s llm_model=%s llm_retry_attempts=%d llm_retry_backoff=%s llm_call_timeout=%s",
 		handler.MaxToolLoops(),
+		handler.MaxRepeatedReadOnlyToolCalls(),
+		handler.MaxInvalidToolCalls(),
 		handler.EffectiveIngestTimeout(),
 		handler.MaxConcurrentIntegrations(),
 		llmProvider,
