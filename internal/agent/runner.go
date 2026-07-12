@@ -8,9 +8,13 @@ import (
 )
 
 const DefaultMaxToolLoops = 80
+const DefaultMaxRepeatedReadOnlyToolCalls = 8
+const DefaultMaxInvalidToolCalls = 3
 
 type RunnerOptions struct {
-	MaxToolLoops int
+	MaxToolLoops                 int
+	MaxRepeatedReadOnlyToolCalls int
+	MaxInvalidToolCalls          int
 }
 
 // ToolCallback is called after each tool execution with the tool name and result.
@@ -19,9 +23,11 @@ type ToolCallback func(name string, input json.RawMessage, result string, err er
 // Runner drives an agentic tool-use loop: send messages to LLM, execute tool calls,
 // feed results back, repeat until the LLM produces a final text response.
 type Runner struct {
-	llm          LLM
-	executor     *ToolExecutor
-	maxToolLoops int
+	llm                          LLM
+	executor                     *ToolExecutor
+	maxToolLoops                 int
+	maxRepeatedReadOnlyToolCalls int
+	maxInvalidToolCalls          int
 }
 
 func NewRunner(llm LLM, executor *ToolExecutor) *Runner {
@@ -33,7 +39,21 @@ func NewRunnerWithOptions(llm LLM, executor *ToolExecutor, opts RunnerOptions) *
 	if maxToolLoops <= 0 {
 		maxToolLoops = DefaultMaxToolLoops
 	}
-	return &Runner{llm: llm, executor: executor, maxToolLoops: maxToolLoops}
+	maxRepeatedReadOnlyToolCalls := opts.MaxRepeatedReadOnlyToolCalls
+	if maxRepeatedReadOnlyToolCalls <= 0 {
+		maxRepeatedReadOnlyToolCalls = DefaultMaxRepeatedReadOnlyToolCalls
+	}
+	maxInvalidToolCalls := opts.MaxInvalidToolCalls
+	if maxInvalidToolCalls <= 0 {
+		maxInvalidToolCalls = DefaultMaxInvalidToolCalls
+	}
+	return &Runner{
+		llm:                          llm,
+		executor:                     executor,
+		maxToolLoops:                 maxToolLoops,
+		maxRepeatedReadOnlyToolCalls: maxRepeatedReadOnlyToolCalls,
+		maxInvalidToolCalls:          maxInvalidToolCalls,
+	}
 }
 
 // Run executes an agent with the given system prompt, tools, and user message.
@@ -51,6 +71,11 @@ func (r *Runner) RunWithCallback(ctx context.Context, system string, tools []Too
 	}
 
 	var records []ToolCallRecord
+	allowedTools := allowedToolNames(tools)
+	readOnlyTools := readOnlyToolNames(tools)
+	lastReadOnlyCallKey := ""
+	consecutiveReadOnlyToolCalls := 0
+	consecutiveInvalidToolCalls := 0
 
 	for i := 0; i < r.maxToolLoops; i++ {
 		resp, err := r.llm.Call(ctx, LLMRequest{
@@ -89,6 +114,31 @@ func (r *Runner) RunWithCallback(ctx context.Context, system string, tools []Too
 
 		var toolResults []ContentBlock
 		for _, tc := range toolCalls {
+			if !allowedTools[tc.Name] {
+				err := fmt.Errorf("invalid tool call %q: not in advertised tool set", tc.Name)
+				records = append(records, ToolCallRecord{Name: tc.Name, Input: tc.Input, Err: err})
+				consecutiveInvalidToolCalls++
+				if consecutiveInvalidToolCalls > r.maxInvalidToolCalls {
+					return "", records, fmt.Errorf("invalid tool call exceeded limit (%d): %w", r.maxInvalidToolCalls, err)
+				}
+				toolResults = append(toolResults, toolErrorResult(tc.ID, err))
+				continue
+			}
+			consecutiveInvalidToolCalls = 0
+			if readOnlyTools[tc.Name] {
+				key := toolCallKey(tc)
+				if key == lastReadOnlyCallKey {
+					consecutiveReadOnlyToolCalls++
+				} else {
+					lastReadOnlyCallKey = key
+					consecutiveReadOnlyToolCalls = 1
+				}
+				if consecutiveReadOnlyToolCalls > r.maxRepeatedReadOnlyToolCalls {
+					err := fmt.Errorf("repeated read-only tool call %q exceeded limit (%d); possible model stall", tc.Name, r.maxRepeatedReadOnlyToolCalls)
+					records = append(records, ToolCallRecord{Name: tc.Name, Input: tc.Input, Err: err})
+					return "", records, err
+				}
+			}
 			log.Printf("[agent] tool_use: %s", tc.Name)
 			result, execErr := r.executor.Execute(tc.Name, tc.Input)
 
@@ -108,6 +158,10 @@ func (r *Runner) RunWithCallback(ctx context.Context, system string, tools []Too
 				block.IsError = true
 			} else {
 				block.Content = result
+				if !readOnlyTools[tc.Name] {
+					lastReadOnlyCallKey = ""
+					consecutiveReadOnlyToolCalls = 0
+				}
 			}
 			toolResults = append(toolResults, block)
 		}
@@ -144,4 +198,35 @@ func ExtractText(content []ContentBlock) string {
 func MarshalToolInput(v any) json.RawMessage {
 	data, _ := json.Marshal(v)
 	return data
+}
+
+func allowedToolNames(tools []Tool) map[string]bool {
+	names := make(map[string]bool, len(tools))
+	for _, tool := range tools {
+		names[tool.Name] = true
+	}
+	return names
+}
+
+func readOnlyToolNames(tools []Tool) map[string]bool {
+	names := make(map[string]bool, len(tools))
+	for _, tool := range tools {
+		if tool.ReadOnly {
+			names[tool.Name] = true
+		}
+	}
+	return names
+}
+
+func toolCallKey(tc ContentBlock) string {
+	return tc.Name + "\x00" + string(tc.Input)
+}
+
+func toolErrorResult(toolUseID string, err error) ContentBlock {
+	return ContentBlock{
+		Type:      "tool_result",
+		ToolUseID: toolUseID,
+		Content:   fmt.Sprintf("Error: %s", err.Error()),
+		IsError:   true,
+	}
 }

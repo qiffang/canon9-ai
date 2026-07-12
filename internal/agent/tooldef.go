@@ -29,6 +29,7 @@ var ToolAppendEvent = Tool{
 var ToolReadEventsSince = Tool{
 	Name:        "read_events_since",
 	Description: "Read raw events after a cursor position. Used by compile_agent to process uncompiled events.",
+	ReadOnly:    true,
 	InputSchema: mustJSON(map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -41,6 +42,7 @@ var ToolReadEventsSince = Tool{
 var ToolReadWikiIndex = Tool{
 	Name:        "read_wiki_index",
 	Description: "Read the wiki index (routing table) to understand the current knowledge structure. Always read this first before accessing specific pages.",
+	ReadOnly:    true,
 	InputSchema: mustJSON(map[string]any{
 		"type":       "object",
 		"properties": map[string]any{},
@@ -50,6 +52,7 @@ var ToolReadWikiIndex = Tool{
 var ToolReadWikiPage = Tool{
 	Name:        "read_wiki_page",
 	Description: "Read a wiki page and its metadata. Automatically tracks access for memory strengthening.",
+	ReadOnly:    true,
 	InputSchema: mustJSON(map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -62,6 +65,7 @@ var ToolReadWikiPage = Tool{
 var ToolSearchWiki = Tool{
 	Name:        "search_wiki",
 	Description: "Search across all wiki pages (including archived) by keyword. Use when you need to find information not easily located via the index. Archived pages can be recovered if found useful.",
+	ReadOnly:    true,
 	InputSchema: mustJSON(map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -111,6 +115,7 @@ var ToolRebuildIndex = Tool{
 var ToolGetMemoryStats = Tool{
 	Name:        "get_memory_stats",
 	Description: "Get system statistics: event counts, wiki page counts, uncompiled event count.",
+	ReadOnly:    true,
 	InputSchema: mustJSON(map[string]any{
 		"type":       "object",
 		"properties": map[string]any{},

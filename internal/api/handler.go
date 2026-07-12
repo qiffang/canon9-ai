@@ -41,7 +41,9 @@ type Handler struct {
 	integrationSlots          chan struct{}
 	maxConcurrentIntegrations int
 
-	maxToolLoops int
+	maxToolLoops                 int
+	maxRepeatedReadOnlyToolCalls int
+	maxInvalidToolCalls          int
 
 	llmRetryAttempts int
 	llmRetryBackoff  time.Duration
@@ -59,15 +61,17 @@ const (
 )
 
 type Options struct {
-	MaxToolLoops              int
-	IngestTimeout             time.Duration
-	MaxConcurrentIntegrations int
-	LLMRetryAttempts          int
-	LLMRetryBackoff           time.Duration
-	LLMCallTimeout            time.Duration
-	LLMProvider               string
-	LLMModel                  string
-	LLMBaseURL                string
+	MaxToolLoops                 int
+	MaxRepeatedReadOnlyToolCalls int
+	MaxInvalidToolCalls          int
+	IngestTimeout                time.Duration
+	MaxConcurrentIntegrations    int
+	LLMRetryAttempts             int
+	LLMRetryBackoff              time.Duration
+	LLMCallTimeout               time.Duration
+	LLMProvider                  string
+	LLMModel                     string
+	LLMBaseURL                   string
 }
 
 // New creates a new API handler with all agents wired up.
@@ -86,7 +90,19 @@ func NewWithOptions(dataDir string, llm agent.LLM, opts Options) (*Handler, erro
 	if maxToolLoops <= 0 {
 		maxToolLoops = agent.DefaultMaxToolLoops
 	}
-	runnerOpts := agent.RunnerOptions{MaxToolLoops: maxToolLoops}
+	maxRepeatedReadOnlyToolCalls := opts.MaxRepeatedReadOnlyToolCalls
+	if maxRepeatedReadOnlyToolCalls <= 0 {
+		maxRepeatedReadOnlyToolCalls = agent.DefaultMaxRepeatedReadOnlyToolCalls
+	}
+	maxInvalidToolCalls := opts.MaxInvalidToolCalls
+	if maxInvalidToolCalls <= 0 {
+		maxInvalidToolCalls = agent.DefaultMaxInvalidToolCalls
+	}
+	runnerOpts := agent.RunnerOptions{
+		MaxToolLoops:                 maxToolLoops,
+		MaxRepeatedReadOnlyToolCalls: maxRepeatedReadOnlyToolCalls,
+		MaxInvalidToolCalls:          maxInvalidToolCalls,
+	}
 	ingestTimeout := opts.IngestTimeout
 	if ingestTimeout <= 0 {
 		ingestTimeout = ingestTimeoutFromEnv()
@@ -97,20 +113,22 @@ func NewWithOptions(dataDir string, llm agent.LLM, opts Options) (*Handler, erro
 	}
 
 	return &Handler{
-		store:                     store,
-		ingest:                    agent.NewIngestAgentWithOptions(llm, executor, runnerOpts),
-		query:                     agent.NewQueryAgentWithOptions(llm, executor, runnerOpts),
-		compile:                   agent.NewCompileAgentWithOptions(llm, executor, runnerOpts),
-		ingestTimeout:             ingestTimeout,
-		integrationSlots:          make(chan struct{}, maxConcurrentIntegrations),
-		maxConcurrentIntegrations: maxConcurrentIntegrations,
-		maxToolLoops:              maxToolLoops,
-		llmRetryAttempts:          opts.LLMRetryAttempts,
-		llmRetryBackoff:           opts.LLMRetryBackoff,
-		llmCallTimeout:            opts.LLMCallTimeout,
-		llmProvider:               opts.LLMProvider,
-		llmModel:                  opts.LLMModel,
-		llmBaseURL:                opts.LLMBaseURL,
+		store:                        store,
+		ingest:                       agent.NewIngestAgentWithOptions(llm, executor, runnerOpts),
+		query:                        agent.NewQueryAgentWithOptions(llm, executor, runnerOpts),
+		compile:                      agent.NewCompileAgentWithOptions(llm, executor, runnerOpts),
+		ingestTimeout:                ingestTimeout,
+		integrationSlots:             make(chan struct{}, maxConcurrentIntegrations),
+		maxConcurrentIntegrations:    maxConcurrentIntegrations,
+		maxToolLoops:                 maxToolLoops,
+		maxRepeatedReadOnlyToolCalls: maxRepeatedReadOnlyToolCalls,
+		maxInvalidToolCalls:          maxInvalidToolCalls,
+		llmRetryAttempts:             opts.LLMRetryAttempts,
+		llmRetryBackoff:              opts.LLMRetryBackoff,
+		llmCallTimeout:               opts.LLMCallTimeout,
+		llmProvider:                  opts.LLMProvider,
+		llmModel:                     opts.LLMModel,
+		llmBaseURL:                   opts.LLMBaseURL,
 	}, nil
 }
 
@@ -296,17 +314,19 @@ func (h *Handler) handleCompile(w http.ResponseWriter, r *http.Request) {
 // StatusResponse extends MemoryStats with runtime info.
 type StatusResponse struct {
 	storage.MemoryStats
-	PendingIntegrations       int64  `json:"pending_integrations"`
-	IngestErrorCount          int64  `json:"ingest_error_count"`
-	IngestTimeout             string `json:"ingest_timeout"`
-	MaxConcurrentIntegrations int    `json:"max_concurrent_integrations"`
-	MaxToolLoops              int    `json:"max_tool_loops"`
-	LLMRetryAttempts          int    `json:"llm_retry_attempts"`
-	LLMRetryBackoff           string `json:"llm_retry_backoff"`
-	LLMCallTimeout            string `json:"llm_call_timeout"`
-	LLMProvider               string `json:"llm_provider,omitempty"`
-	LLMModel                  string `json:"llm_model,omitempty"`
-	LLMBaseURL                string `json:"llm_base_url,omitempty"`
+	PendingIntegrations          int64  `json:"pending_integrations"`
+	IngestErrorCount             int64  `json:"ingest_error_count"`
+	IngestTimeout                string `json:"ingest_timeout"`
+	MaxConcurrentIntegrations    int    `json:"max_concurrent_integrations"`
+	MaxToolLoops                 int    `json:"max_tool_loops"`
+	MaxRepeatedReadOnlyToolCalls int    `json:"max_repeated_read_only_tool_calls"`
+	MaxInvalidToolCalls          int    `json:"max_invalid_tool_calls"`
+	LLMRetryAttempts             int    `json:"llm_retry_attempts"`
+	LLMRetryBackoff              string `json:"llm_retry_backoff"`
+	LLMCallTimeout               string `json:"llm_call_timeout"`
+	LLMProvider                  string `json:"llm_provider,omitempty"`
+	LLMModel                     string `json:"llm_model,omitempty"`
+	LLMBaseURL                   string `json:"llm_base_url,omitempty"`
 }
 
 func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -317,18 +337,20 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, StatusResponse{
-		MemoryStats:               *stats,
-		PendingIntegrations:       h.pendingIntegrations.Load(),
-		IngestErrorCount:          h.ingestErrors.Load(),
-		IngestTimeout:             h.effectiveIngestTimeout().String(),
-		MaxConcurrentIntegrations: h.maxConcurrentIntegrations,
-		MaxToolLoops:              h.maxToolLoops,
-		LLMRetryAttempts:          h.llmRetryAttempts,
-		LLMRetryBackoff:           h.llmRetryBackoff.String(),
-		LLMCallTimeout:            h.llmCallTimeout.String(),
-		LLMProvider:               h.llmProvider,
-		LLMModel:                  h.llmModel,
-		LLMBaseURL:                h.llmBaseURL,
+		MemoryStats:                  *stats,
+		PendingIntegrations:          h.pendingIntegrations.Load(),
+		IngestErrorCount:             h.ingestErrors.Load(),
+		IngestTimeout:                h.effectiveIngestTimeout().String(),
+		MaxConcurrentIntegrations:    h.maxConcurrentIntegrations,
+		MaxToolLoops:                 h.maxToolLoops,
+		MaxRepeatedReadOnlyToolCalls: h.maxRepeatedReadOnlyToolCalls,
+		MaxInvalidToolCalls:          h.maxInvalidToolCalls,
+		LLMRetryAttempts:             h.llmRetryAttempts,
+		LLMRetryBackoff:              h.llmRetryBackoff.String(),
+		LLMCallTimeout:               h.llmCallTimeout.String(),
+		LLMProvider:                  h.llmProvider,
+		LLMModel:                     h.llmModel,
+		LLMBaseURL:                   h.llmBaseURL,
 	})
 }
 
@@ -345,6 +367,14 @@ func (h *Handler) MaxConcurrentIntegrations() int {
 
 func (h *Handler) MaxToolLoops() int {
 	return h.maxToolLoops
+}
+
+func (h *Handler) MaxRepeatedReadOnlyToolCalls() int {
+	return h.maxRepeatedReadOnlyToolCalls
+}
+
+func (h *Handler) MaxInvalidToolCalls() int {
+	return h.maxInvalidToolCalls
 }
 
 func (h *Handler) acquireIntegrationSlot() func() {

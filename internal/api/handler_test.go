@@ -205,6 +205,12 @@ func TestStatusEndpoint(t *testing.T) {
 	if stats.MaxToolLoops != h.MaxToolLoops() {
 		t.Fatalf("max_tool_loops=%d, want %d", stats.MaxToolLoops, h.MaxToolLoops())
 	}
+	if stats.MaxRepeatedReadOnlyToolCalls != h.MaxRepeatedReadOnlyToolCalls() {
+		t.Fatalf("max_repeated_read_only_tool_calls=%d, want %d", stats.MaxRepeatedReadOnlyToolCalls, h.MaxRepeatedReadOnlyToolCalls())
+	}
+	if stats.MaxInvalidToolCalls != h.MaxInvalidToolCalls() {
+		t.Fatalf("max_invalid_tool_calls=%d, want %d", stats.MaxInvalidToolCalls, h.MaxInvalidToolCalls())
+	}
 	if stats.LLMRetryAttempts != agent.DefaultLLMRetryAttempts {
 		t.Fatalf("llm_retry_attempts=%d, want %d", stats.LLMRetryAttempts, agent.DefaultLLMRetryAttempts)
 	}
