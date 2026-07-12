@@ -84,8 +84,63 @@ var MCPTools = []mcpTool{
 	},
 }
 
+// AgentMCPTools defines the tools exposed in agent mode.
+// These mirror the IntegrateTools from internal/agent/tooldef.go.
+var AgentMCPTools = []mcpTool{
+	{
+		Name:        "read_wiki_index",
+		Description: "Read the wiki index (routing table) to understand the current knowledge structure. Always read this first before accessing specific pages.",
+		InputSchema: mustJSON(map[string]any{
+			"type":       "object",
+			"properties": map[string]any{},
+		}),
+	},
+	{
+		Name:        "read_wiki_page",
+		Description: "Read a wiki page and its metadata. Automatically tracks access for memory strengthening.",
+		InputSchema: mustJSON(map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path": map[string]any{"type": "string", "description": "Relative path within wiki/ (e.g. semantic/projects/db9.md)"},
+			},
+			"required": []string{"path"},
+		}),
+	},
+	{
+		Name:        "write_wiki_page",
+		Description: "Create or update a wiki page. Pass source_events and trust_tier to track provenance in sidecar metadata.",
+		InputSchema: mustJSON(map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path":          map[string]any{"type": "string", "description": "Relative path within wiki/ (e.g. semantic/projects/db9.md)"},
+				"content":       map[string]any{"type": "string", "description": "Full markdown content of the page"},
+				"source_events": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Event IDs that contributed to this page"},
+				"trust_tier":    map[string]any{"type": "integer", "enum": []int{1, 2, 3}, "description": "Highest trust level among sources: 1=user direct, 2=tool/inferred, 3=second-hand"},
+			},
+			"required": []string{"path", "content"},
+		}),
+	},
+	{
+		Name:        "search_wiki",
+		Description: "Search across all wiki pages by keyword. Returns matching lines with file paths.",
+		InputSchema: mustJSON(map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"query": map[string]any{"type": "string", "description": "Search query (case-insensitive text match)"},
+			},
+			"required": []string{"query"},
+		}),
+	},
+}
+
 // executeTool dispatches an MCP tool call to the storage layer.
 func (s *Server) executeTool(name string, args map[string]any) (string, error) {
+	// Agent mode tools.
+	if s.mode == ModeAgent {
+		return s.executeAgentTool(name, args)
+	}
+
+	// Consumption mode tools.
 	switch name {
 	case "search_concepts":
 		return s.execSearchConcepts(args)
@@ -100,6 +155,97 @@ func (s *Server) executeTool(name string, args map[string]any) (string, error) {
 	default:
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
+}
+
+func (s *Server) executeAgentTool(name string, args map[string]any) (string, error) {
+	switch name {
+	case "read_wiki_index":
+		return s.execAgentReadWikiIndex()
+	case "read_wiki_page":
+		return s.execAgentReadWikiPage(args)
+	case "write_wiki_page":
+		return s.execAgentWriteWikiPage(args)
+	case "search_wiki":
+		return s.execAgentSearchWiki(args)
+	default:
+		return "", fmt.Errorf("unknown tool: %s", name)
+	}
+}
+
+func (s *Server) execAgentReadWikiIndex() (string, error) {
+	content, err := s.store.ReadWikiIndex()
+	if err != nil {
+		return "", err
+	}
+	if content == "" {
+		return "_No wiki index yet. Wiki is empty._", nil
+	}
+	return content, nil
+}
+
+func (s *Server) execAgentReadWikiPage(args map[string]any) (string, error) {
+	path, ok := args["path"].(string)
+	if !ok || path == "" {
+		return "", fmt.Errorf("path is required")
+	}
+	if err := validatePath(path); err != nil {
+		return "", err
+	}
+	page, err := s.store.ReadWikiPage(path)
+	if err != nil {
+		return "", err
+	}
+	data, _ := json.Marshal(page)
+	return string(data), nil
+}
+
+func (s *Server) execAgentWriteWikiPage(args map[string]any) (string, error) {
+	path, ok := args["path"].(string)
+	if !ok || path == "" {
+		return "", fmt.Errorf("path is required")
+	}
+	content, ok := args["content"].(string)
+	if !ok || content == "" {
+		return "", fmt.Errorf("content is required")
+	}
+	if err := validatePath(path); err != nil {
+		return "", err
+	}
+
+	var sourceEvents []string
+	if se, ok := args["source_events"].([]any); ok {
+		for _, v := range se {
+			if s, ok := v.(string); ok {
+				sourceEvents = append(sourceEvents, s)
+			}
+		}
+	}
+
+	trustTier := 0
+	if tt, ok := args["trust_tier"].(float64); ok {
+		trustTier = int(tt)
+	}
+
+	if err := s.store.WriteWikiPageWithMeta(path, content, sourceEvents, trustTier); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(`{"status": "ok", "path": "%s"}`, path), nil
+}
+
+func (s *Server) execAgentSearchWiki(args map[string]any) (string, error) {
+	query, ok := args["query"].(string)
+	if !ok || query == "" {
+		return "", fmt.Errorf("query is required")
+	}
+	results, err := s.store.SearchWiki(query)
+	if err != nil {
+		return "", err
+	}
+	if len(results) == 0 {
+		return "No results found.", nil
+	}
+	data, _ := json.Marshal(results)
+	return string(data), nil
 }
 
 func (s *Server) execSearchConcepts(args map[string]any) (string, error) {
