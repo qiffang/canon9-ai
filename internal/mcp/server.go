@@ -21,14 +21,30 @@ import (
 // ProtocolVersion is the MCP protocol version we advertise.
 const ProtocolVersion = "2024-11-05"
 
+// ServerMode determines which tool set the MCP server exposes.
+type ServerMode string
+
+const (
+	// ModeConsumption exposes the 5 consumption tools (default).
+	ModeConsumption ServerMode = "consumption"
+	// ModeAgent exposes the 4 IntegrateTools (read_wiki_index, read_wiki_page, write_wiki_page, search_wiki).
+	ModeAgent ServerMode = "agent"
+)
+
 // Server handles MCP JSON-RPC requests over stdio.
 type Server struct {
 	store storage.Store
+	mode  ServerMode
 }
 
-// NewServer creates an MCP server backed by the given store.
+// NewServer creates an MCP server in consumption mode backed by the given store.
 func NewServer(store storage.Store) *Server {
-	return &Server{store: store}
+	return &Server{store: store, mode: ModeConsumption}
+}
+
+// NewServerWithMode creates an MCP server in the specified mode.
+func NewServerWithMode(store storage.Store, mode ServerMode) *Server {
+	return &Server{store: store, mode: mode}
 }
 
 // --- JSON-RPC types ---
@@ -217,10 +233,14 @@ func (s *Server) handleInitialize(req jsonRPCRequest) *jsonRPCResponse {
 }
 
 func (s *Server) handleToolsList(req jsonRPCRequest) *jsonRPCResponse {
+	tools := MCPTools
+	if s.mode == ModeAgent {
+		tools = AgentMCPTools
+	}
 	return &jsonRPCResponse{
 		JSONRPC: "2.0",
 		ID:      req.ID,
-		Result:  toolsListResult{Tools: MCPTools},
+		Result:  toolsListResult{Tools: tools},
 	}
 }
 

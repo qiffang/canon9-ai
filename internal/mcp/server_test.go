@@ -721,6 +721,223 @@ func TestBundleMode_NoDirCreation(t *testing.T) {
 	}
 }
 
+// --- Agent mode tests ---
+
+func setupAgentServer(t *testing.T) (*Server, storage.Store) {
+	t.Helper()
+	dir := t.TempDir()
+	store, err := storage.NewFS(dir)
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	return NewServerWithMode(store, ModeAgent), store
+}
+
+func TestAgentMode_ToolsList(t *testing.T) {
+	s, _ := setupAgentServer(t)
+	resp := call(t, s, "tools/list", 1, nil)
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+
+	data, _ := json.Marshal(resp.Result)
+	var result toolsListResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(result.Tools) != 4 {
+		t.Fatalf("expected 4 agent tools, got %d", len(result.Tools))
+	}
+
+	names := make(map[string]bool)
+	for _, tool := range result.Tools {
+		names[tool.Name] = true
+	}
+
+	expected := []string{"read_wiki_index", "read_wiki_page", "write_wiki_page", "search_wiki"}
+	for _, name := range expected {
+		if !names[name] {
+			t.Errorf("missing agent tool: %s", name)
+		}
+	}
+
+	// Verify consumption tools are NOT present.
+	for _, name := range []string{"search_concepts", "read_concept", "neighbors", "write_memory", "memory_status"} {
+		if names[name] {
+			t.Errorf("consumption tool %q should not be in agent mode", name)
+		}
+	}
+}
+
+func TestAgentMode_ReadWikiIndex_Empty(t *testing.T) {
+	s, _ := setupAgentServer(t)
+	resp := call(t, s, "tools/call", 1, map[string]any{
+		"name":      "read_wiki_index",
+		"arguments": map[string]any{},
+	})
+
+	data, _ := json.Marshal(resp.Result)
+	var result toolsCallResult
+	json.Unmarshal(data, &result)
+
+	if result.IsError {
+		t.Fatalf("error: %s", result.Content[0].Text)
+	}
+	if !strings.Contains(result.Content[0].Text, "empty") {
+		t.Errorf("expected empty message, got %q", result.Content[0].Text)
+	}
+}
+
+func TestAgentMode_ReadWikiIndex_WithContent(t *testing.T) {
+	s, store := setupAgentServer(t)
+	store.WriteWikiPage("semantic/test.md", "# Test")
+	store.RebuildIndex()
+
+	resp := call(t, s, "tools/call", 1, map[string]any{
+		"name":      "read_wiki_index",
+		"arguments": map[string]any{},
+	})
+
+	data, _ := json.Marshal(resp.Result)
+	var result toolsCallResult
+	json.Unmarshal(data, &result)
+
+	if result.IsError {
+		t.Fatalf("error: %s", result.Content[0].Text)
+	}
+	if !strings.Contains(result.Content[0].Text, "semantic") {
+		t.Errorf("expected index with semantic, got %q", result.Content[0].Text)
+	}
+}
+
+func TestAgentMode_WriteAndReadWikiPage(t *testing.T) {
+	s, _ := setupAgentServer(t)
+
+	// Write a page.
+	resp := call(t, s, "tools/call", 1, map[string]any{
+		"name": "write_wiki_page",
+		"arguments": map[string]any{
+			"path":          "semantic/agent-test.md",
+			"content":       "# Agent Test\n\nWritten via agent mode.",
+			"source_events": []string{"evt_001"},
+			"trust_tier":    1,
+		},
+	})
+	data, _ := json.Marshal(resp.Result)
+	var writeResult toolsCallResult
+	json.Unmarshal(data, &writeResult)
+
+	if writeResult.IsError {
+		t.Fatalf("write error: %s", writeResult.Content[0].Text)
+	}
+	if !strings.Contains(writeResult.Content[0].Text, "ok") {
+		t.Errorf("expected ok status, got %q", writeResult.Content[0].Text)
+	}
+
+	// Read it back.
+	resp = call(t, s, "tools/call", 2, map[string]any{
+		"name":      "read_wiki_page",
+		"arguments": map[string]any{"path": "semantic/agent-test.md"},
+	})
+	data, _ = json.Marshal(resp.Result)
+	var readResult toolsCallResult
+	json.Unmarshal(data, &readResult)
+
+	if readResult.IsError {
+		t.Fatalf("read error: %s", readResult.Content[0].Text)
+	}
+	if !strings.Contains(readResult.Content[0].Text, "Written via agent mode") {
+		t.Errorf("expected page content, got %q", readResult.Content[0].Text)
+	}
+}
+
+func TestAgentMode_SearchWiki(t *testing.T) {
+	s, store := setupAgentServer(t)
+
+	store.WriteWikiPage("semantic/search-target.md", "# Search Target\n\nFoo bar baz quux.")
+	store.RebuildIndex()
+
+	resp := call(t, s, "tools/call", 1, map[string]any{
+		"name":      "search_wiki",
+		"arguments": map[string]any{"query": "quux"},
+	})
+	data, _ := json.Marshal(resp.Result)
+	var result toolsCallResult
+	json.Unmarshal(data, &result)
+
+	if result.IsError {
+		t.Fatalf("search error: %s", result.Content[0].Text)
+	}
+	if !strings.Contains(result.Content[0].Text, "quux") {
+		t.Errorf("expected search result with quux, got %q", result.Content[0].Text)
+	}
+}
+
+func TestAgentMode_SearchWiki_NoResults(t *testing.T) {
+	s, _ := setupAgentServer(t)
+	resp := call(t, s, "tools/call", 1, map[string]any{
+		"name":      "search_wiki",
+		"arguments": map[string]any{"query": "nonexistent"},
+	})
+	data, _ := json.Marshal(resp.Result)
+	var result toolsCallResult
+	json.Unmarshal(data, &result)
+
+	if result.Content[0].Text != "No results found." {
+		t.Errorf("expected no results, got %q", result.Content[0].Text)
+	}
+}
+
+func TestAgentMode_ReadWikiPage_PathTraversal(t *testing.T) {
+	s, _ := setupAgentServer(t)
+	resp := call(t, s, "tools/call", 1, map[string]any{
+		"name":      "read_wiki_page",
+		"arguments": map[string]any{"path": "../../../etc/passwd"},
+	})
+	data, _ := json.Marshal(resp.Result)
+	var result toolsCallResult
+	json.Unmarshal(data, &result)
+
+	if !result.IsError {
+		t.Error("expected isError=true for path traversal")
+	}
+}
+
+func TestAgentMode_WriteWikiPage_MissingContent(t *testing.T) {
+	s, _ := setupAgentServer(t)
+	resp := call(t, s, "tools/call", 1, map[string]any{
+		"name":      "write_wiki_page",
+		"arguments": map[string]any{"path": "semantic/test.md"},
+	})
+	data, _ := json.Marshal(resp.Result)
+	var result toolsCallResult
+	json.Unmarshal(data, &result)
+
+	if !result.IsError {
+		t.Error("expected isError=true for missing content")
+	}
+}
+
+func TestAgentMode_ConsumptionToolRejected(t *testing.T) {
+	s, _ := setupAgentServer(t)
+	resp := call(t, s, "tools/call", 1, map[string]any{
+		"name":      "search_concepts",
+		"arguments": map[string]any{"query": "test"},
+	})
+	data, _ := json.Marshal(resp.Result)
+	var result toolsCallResult
+	json.Unmarshal(data, &result)
+
+	if !result.IsError {
+		t.Error("expected isError=true for consumption tool in agent mode")
+	}
+	if !strings.Contains(result.Content[0].Text, "unknown tool") {
+		t.Errorf("expected unknown tool error, got %q", result.Content[0].Text)
+	}
+}
+
 func TestMultipleRequests(t *testing.T) {
 	s := setupServer(t)
 

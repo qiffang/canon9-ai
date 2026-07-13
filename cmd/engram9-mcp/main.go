@@ -28,6 +28,7 @@ import (
 func main() {
 	dataDir := flag.String("data", "", "runtime data directory (same as engram9 HTTP server)")
 	bundleDir := flag.String("bundle", "", "OKF bundle directory to consume (read-only)")
+	mode := flag.String("mode", "consumption", "tool mode: consumption (default 5 tools) or agent (4 IntegrateTools)")
 	flag.Parse()
 
 	// Direct all log output to stderr so stdout is clean JSON-RPC.
@@ -63,7 +64,23 @@ func main() {
 		log.Printf("engram9-mcp started in runtime mode (data: %s)", *dataDir)
 	}
 
-	server := mcp.NewServer(store)
+	var serverMode mcp.ServerMode
+	switch *mode {
+	case "consumption", "":
+		serverMode = mcp.ModeConsumption
+	case "agent":
+		if *bundleDir != "" {
+			fmt.Fprintln(os.Stderr, "error: -mode agent requires -data (read-write store); -bundle is read-only")
+			os.Exit(1)
+		}
+		serverMode = mcp.ModeAgent
+	default:
+		fmt.Fprintf(os.Stderr, "error: unknown mode %q (use 'consumption' or 'agent')\n", *mode)
+		os.Exit(1)
+	}
+
+	server := mcp.NewServerWithMode(store, serverMode)
+	log.Printf("engram9-mcp mode: %s", serverMode)
 	if err := server.Serve(os.Stdin, os.Stdout); err != nil {
 		log.Fatalf("serve: %v", err)
 	}
