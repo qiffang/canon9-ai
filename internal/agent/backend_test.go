@@ -73,6 +73,65 @@ func TestReadACPResponseSkipsMalformedLines(t *testing.T) {
 	}
 }
 
+func TestReadACPResponseForIDMatchesCorrectID(t *testing.T) {
+	// Response with id=1 should be returned when expecting "1".
+	line := `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}` + "\n"
+	scanner := bufio.NewScanner(strings.NewReader(line))
+	scanner.Buffer(make([]byte, 4<<20), 4<<20)
+
+	resp, err := readACPResponseForID(scanner, "1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Result == nil {
+		t.Fatal("expected result in response")
+	}
+}
+
+func TestReadACPResponseForIDSkipsWrongID(t *testing.T) {
+	// First line has id=99 (wrong), second has id=1 (correct).
+	input := `{"jsonrpc":"2.0","id":99,"result":{"stale":true}}` + "\n" +
+		`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}` + "\n"
+	scanner := bufio.NewScanner(strings.NewReader(input))
+	scanner.Buffer(make([]byte, 4<<20), 4<<20)
+
+	resp, err := readACPResponseForID(scanner, "1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(string(resp.Result), "protocolVersion") {
+		t.Fatalf("got wrong response: %s", string(resp.Result))
+	}
+}
+
+func TestReadACPResponseForIDSkipsNotifications(t *testing.T) {
+	// Notification (no id) followed by the expected response.
+	input := `{"jsonrpc":"2.0","method":"some/notification","params":{}}` + "\n" +
+		`{"jsonrpc":"2.0","id":2,"result":{"sessionId":"abc"}}` + "\n"
+	scanner := bufio.NewScanner(strings.NewReader(input))
+	scanner.Buffer(make([]byte, 4<<20), 4<<20)
+
+	resp, err := readACPResponseForID(scanner, "2")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(string(resp.Result), "sessionId") {
+		t.Fatalf("got wrong response: %s", string(resp.Result))
+	}
+}
+
+func TestReadACPResponseForIDEOFWithoutMatch(t *testing.T) {
+	// Only wrong-id responses, never the expected one — should return EOF.
+	input := `{"jsonrpc":"2.0","id":99,"result":{}}` + "\n"
+	scanner := bufio.NewScanner(strings.NewReader(input))
+	scanner.Buffer(make([]byte, 4<<20), 4<<20)
+
+	_, err := readACPResponseForID(scanner, "1")
+	if err == nil {
+		t.Fatal("expected error when expected ID never appears")
+	}
+}
+
 func TestACPProtocolVersionIsInteger(t *testing.T) {
 	// Verify the initialize request uses integer protocolVersion, not string.
 	params := mustMarshal(map[string]any{

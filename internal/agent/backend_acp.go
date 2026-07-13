@@ -181,7 +181,7 @@ func (b *ACPBackend) runACPTurn(ctx context.Context, prompt string, valOpts Vali
 	if err := sendACPRequest(stdin, initReq); err != nil {
 		return "", fmt.Errorf("send initialize: %w", err)
 	}
-	initResp, err := readACPResponse(scanner)
+	initResp, err := readACPResponseForID(scanner, "1")
 	if err != nil {
 		return "", fmt.Errorf("initialize response: %w", err)
 	}
@@ -219,7 +219,7 @@ func (b *ACPBackend) runACPTurn(ctx context.Context, prompt string, valOpts Vali
 	if err := sendACPRequest(stdin, sessionReq); err != nil {
 		return "", fmt.Errorf("send session/new: %w", err)
 	}
-	sessionResp, err := readACPResponse(scanner)
+	sessionResp, err := readACPResponseForID(scanner, "2")
 	if err != nil {
 		return "", fmt.Errorf("session/new response: %w", err)
 	}
@@ -339,6 +339,40 @@ func sendACPRequest(w io.Writer, req acpRequest) error {
 	}
 	_, err = fmt.Fprintf(w, "%s\n", data)
 	return err
+}
+
+// readACPResponseForID reads lines until it finds a response matching the
+// expected request ID. Notifications (no ID) and responses with non-matching
+// IDs are logged and skipped. This prevents a stale response or notification
+// from being mistaken for a handshake response.
+func readACPResponseForID(scanner *bufio.Scanner, expectedID string) (*acpResponse, error) {
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var resp acpResponse
+		if err := json.Unmarshal([]byte(line), &resp); err != nil {
+			continue
+		}
+		// Skip notifications (no ID).
+		if resp.ID == nil {
+			if resp.Method != "" {
+				log.Printf("[acp] notification during handshake: %s", resp.Method)
+			}
+			continue
+		}
+		// Check ID matches.
+		respID := strings.Trim(string(resp.ID), `"`)
+		if respID == expectedID {
+			return &resp, nil
+		}
+		log.Printf("[acp] unexpected response id=%s (want %s), skipping", respID, expectedID)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return nil, io.EOF
 }
 
 func readACPResponse(scanner *bufio.Scanner) (*acpResponse, error) {
