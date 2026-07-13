@@ -70,7 +70,12 @@ func (v *WikiValidator) Validate(prodDir, stagingDir string, opts ...ValidateOpt
 			return err
 		}
 
-		// Only .md files are allowed in wiki. Reject anything else.
+		// Skip store-owned sidecar metadata (e.g. .meta/*.json).
+		if strings.HasPrefix(relPath, ".meta/") || strings.HasPrefix(relPath, ".meta\\") {
+			return nil
+		}
+
+		// Only .md files are allowed in wiki content. Reject anything else.
 		if !strings.HasSuffix(relPath, ".md") {
 			violations = append(violations, Violation{
 				Path:    relPath,

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/qiffang/engram9/internal/storage"
@@ -31,10 +32,13 @@ type ACPBackendConfig struct {
 }
 
 // ACPBackend runs wiki agents via acpmux ACP protocol.
+// Ingest turns are serialized by ingestMu to prevent concurrent snapshot-replace
+// from overwriting each other's wiki changes (lost-update race).
 type ACPBackend struct {
 	cfg       ACPBackendConfig
 	dataDir   string
 	validator *WikiValidator
+	ingestMu  sync.Mutex
 }
 
 // NewACPBackend creates an ACPBackend. It validates the config at construction time.
@@ -78,6 +82,11 @@ func NewACPBackend(dataDir string, cfg ACPBackendConfig) (*ACPBackend, error) {
 }
 
 func (b *ACPBackend) RunIngest(ctx context.Context, eventID string, text string, ctxInfo map[string]string) (IngestResult, error) {
+	// Serialize ACP ingest turns to prevent lost-update race: each turn
+	// snapshots the entire data dir and replaces wiki/ atomically.
+	b.ingestMu.Lock()
+	defer b.ingestMu.Unlock()
+
 	prompt := fmt.Sprintf(`You are the Ingest Agent. Event %s has been recorded with this content:
 
 %s`, eventID, text)
@@ -433,4 +442,3 @@ func mergeWiki(stagingDir, prodDir string) error {
 	}
 	return nil
 }
-

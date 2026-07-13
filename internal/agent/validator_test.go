@@ -191,6 +191,25 @@ func TestWikiValidatorAllowsDeleteWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestWikiValidatorAllowsMetaSidecars(t *testing.T) {
+	prod := t.TempDir()
+	staging := t.TempDir()
+
+	writeTestFile(t, staging, "wiki/.meta/index.json", `{"pages":[]}`)
+	writeTestFile(t, staging, "wiki/semantic/a.md", validFrontmatter)
+
+	v := NewWikiValidator(DefaultACPMaxDiffBytes)
+	violations, err := v.Validate(prod, staging)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, vi := range violations {
+		if vi.Path == ".meta/index.json" {
+			t.Fatalf("expected .meta/ sidecar to be allowed, got violation: %v", vi)
+		}
+	}
+}
+
 func TestWikiValidatorRejectsNonMarkdownFiles(t *testing.T) {
 	prod := t.TempDir()
 	staging := t.TempDir()
