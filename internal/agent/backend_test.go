@@ -3,7 +3,9 @@ package agent
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -28,6 +30,46 @@ func TestNewACPBackendRejectsNonClaudeProvider(t *testing.T) {
 	_, err := NewACPBackend(t.TempDir(), ACPBackendConfig{Provider: "codex"})
 	if err == nil {
 		t.Fatal("expected error for ACP_PROVIDER=codex")
+	}
+}
+
+func TestACPMuxArgsRestrictClaudeTools(t *testing.T) {
+	want := []string{
+		"--provider", "claude",
+		"--provider-arg", "--tools",
+		"--provider-arg", "ToolSearch,Glob,Grep",
+		"--provider-arg", "--allowedTools",
+		"--provider-arg", "mcp__engram9__read_wiki_index,mcp__engram9__read_wiki_page,mcp__engram9__write_wiki_page,mcp__engram9__search_wiki",
+		"--provider-arg", "--permission-mode",
+		"--provider-arg", "dontAsk",
+		"--provider-arg", "--strict-mcp-config",
+	}
+	if got := acpmuxArgs("claude"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("acpmuxArgs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestACPSessionRequestUsesStagingCWD(t *testing.T) {
+	req := newACPSessionRequest("/tmp/staging")
+	var params struct {
+		CWD        string `json:"cwd"`
+		MCPServers []struct {
+			Command string   `json:"command"`
+			Args    []string `json:"args"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		t.Fatalf("decode session params: %v", err)
+	}
+	if params.CWD != "/tmp/staging" {
+		t.Fatalf("cwd = %q, want /tmp/staging", params.CWD)
+	}
+	if len(params.MCPServers) != 1 || params.MCPServers[0].Command != "engram9-mcp" {
+		t.Fatalf("mcpServers = %#v, want engram9-mcp", params.MCPServers)
+	}
+	wantArgs := []string{"-data", "/tmp/staging", "-mode", "agent"}
+	if !reflect.DeepEqual(params.MCPServers[0].Args, wantArgs) {
+		t.Fatalf("mcp args = %#v, want %#v", params.MCPServers[0].Args, wantArgs)
 	}
 }
 

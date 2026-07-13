@@ -139,18 +139,7 @@ func (b *ACPBackend) runACPTurn(ctx context.Context, prompt string, valOpts Vali
 	// Claude needs ToolSearch to discover MCP tools at runtime, plus Glob/Grep
 	// for read-only file access. Write isolation is enforced by --allowedTools
 	// restricting to engram9 MCP tools only (no Write/Edit/Bash).
-	args := []string{
-		"--provider", b.cfg.Provider,
-		"--provider-arg", "--tools",
-		"--provider-arg", "ToolSearch,Glob,Grep",
-		"--provider-arg", "--allowedTools",
-		"--provider-arg", "mcp__engram9__read_wiki_index,mcp__engram9__read_wiki_page,mcp__engram9__write_wiki_page,mcp__engram9__search_wiki",
-		"--provider-arg", "--permission-mode",
-		"--provider-arg", "dontAsk",
-		"--provider-arg", "--strict-mcp-config",
-	}
-
-	cmd := exec.CommandContext(ctx, b.cfg.AcpmuxCommand, args...)
+	cmd := exec.CommandContext(ctx, b.cfg.AcpmuxCommand, acpmuxArgs(b.cfg.Provider)...)
 	cmd.Stderr = os.Stderr
 
 	stdin, err := cmd.StdinPipe()
@@ -208,22 +197,7 @@ func (b *ACPBackend) runACPTurn(ctx context.Context, prompt string, valOpts Vali
 	// 4. Send session/new with MCP config.
 	// acpmux expects MCP server fields at top level (type, name, command, args),
 	// NOT nested under a "transport" key.
-	sessionReq := acpRequest{
-		JSONRPC: "2.0",
-		ID:      json.RawMessage(`2`),
-		Method:  "session/new",
-		Params: mustMarshal(map[string]any{
-			"cwd": stagingDir,
-			"mcpServers": []map[string]any{
-				{
-					"name":    "engram9",
-					"type":    "stdio",
-					"command": "engram9-mcp",
-					"args":    []string{"-data", stagingDir, "-mode", "agent"},
-				},
-			},
-		}),
-	}
+	sessionReq := newACPSessionRequest(stagingDir)
 	if err := sendACPRequest(stdin, sessionReq); err != nil {
 		return "", fmt.Errorf("send session/new: %w", err)
 	}
@@ -338,6 +312,38 @@ type acpResponse struct {
 type acpError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+}
+
+func acpmuxArgs(provider string) []string {
+	return []string{
+		"--provider", provider,
+		"--provider-arg", "--tools",
+		"--provider-arg", "ToolSearch,Glob,Grep",
+		"--provider-arg", "--allowedTools",
+		"--provider-arg", "mcp__engram9__read_wiki_index,mcp__engram9__read_wiki_page,mcp__engram9__write_wiki_page,mcp__engram9__search_wiki",
+		"--provider-arg", "--permission-mode",
+		"--provider-arg", "dontAsk",
+		"--provider-arg", "--strict-mcp-config",
+	}
+}
+
+func newACPSessionRequest(stagingDir string) acpRequest {
+	return acpRequest{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage(`2`),
+		Method:  "session/new",
+		Params: mustMarshal(map[string]any{
+			"cwd": stagingDir,
+			"mcpServers": []map[string]any{
+				{
+					"name":    "engram9",
+					"type":    "stdio",
+					"command": "engram9-mcp",
+					"args":    []string{"-data", stagingDir, "-mode", "agent"},
+				},
+			},
+		}),
+	}
 }
 
 func sendACPRequest(w io.Writer, req acpRequest) error {
