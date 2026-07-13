@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/qiffang/engram9/internal/agent"
@@ -45,41 +46,107 @@ func runServe(args []string) {
 	llmCallTimeout := flags.Duration("llm-call-timeout", agent.DefaultLLMCallTimeout, "per-attempt timeout for each LLM API call (0 disables per-attempt timeout)")
 	_ = flags.Parse(args)
 
+	// Resolve backend configuration.
+	wikiBackend := os.Getenv("WIKI_BACKEND")
+	if wikiBackend == "" {
+		wikiBackend = "llm"
+	}
+	queryBackend := os.Getenv("QUERY_BACKEND")
+	if queryBackend == "" {
+		queryBackend = "llm"
+	}
+
+	// Determine if LLM is needed.
+	// LLM is required when: wiki backend is "llm" OR query backend is "llm".
+	needLLM := wikiBackend == "llm" || queryBackend == "llm"
+
 	var llm agent.LLM
-	llmProvider := "anthropic"
+	llmProvider := ""
 	llmModel := ""
 	llmBaseURL := ""
-	switch os.Getenv("LLM_PROVIDER") {
-	case "openai":
-		if os.Getenv("OPENAI_API_KEY") == "" {
-			fmt.Fprintln(os.Stderr, "error: OPENAI_API_KEY environment variable is required when LLM_PROVIDER=openai")
-			os.Exit(1)
+
+	if needLLM {
+		switch os.Getenv("LLM_PROVIDER") {
+		case "openai":
+			if os.Getenv("OPENAI_API_KEY") == "" {
+				if queryBackend == "llm" {
+					fmt.Fprintf(os.Stderr, "error: OPENAI_API_KEY is required because QUERY_BACKEND=llm\n")
+				} else {
+					fmt.Fprintf(os.Stderr, "error: OPENAI_API_KEY is required because WIKI_BACKEND=llm\n")
+				}
+				os.Exit(1)
+			}
+			openAILLM := agent.NewOpenAILLM(*model)
+			llm = openAILLM
+			llmProvider = "openai"
+			llmModel = openAILLM.Model
+			llmBaseURL = openAILLM.BaseURL
+			log.Printf("using OpenAI-compatible provider (base: %s, model: %s)", llmBaseURL, llmModel)
+		default:
+			if os.Getenv("ANTHROPIC_API_KEY") == "" {
+				if queryBackend == "llm" {
+					fmt.Fprintf(os.Stderr, "error: ANTHROPIC_API_KEY is required because QUERY_BACKEND=llm\n")
+				} else {
+					fmt.Fprintf(os.Stderr, "error: ANTHROPIC_API_KEY is required because WIKI_BACKEND=llm\n")
+				}
+				os.Exit(1)
+			}
+			anthropicLLM := agent.NewAnthropicLLM(*model)
+			llm = anthropicLLM
+			llmProvider = "anthropic"
+			llmModel = anthropicLLM.Model
+			log.Printf("using Anthropic provider (model: %s)", llmModel)
 		}
-		openAILLM := agent.NewOpenAILLM(*model)
-		llm = openAILLM
-		llmProvider = "openai"
-		llmModel = openAILLM.Model
-		llmBaseURL = openAILLM.BaseURL
-		log.Printf("using OpenAI-compatible provider (base: %s, model: %s)", llmBaseURL, llmModel)
-	default:
-		if os.Getenv("ANTHROPIC_API_KEY") == "" {
-			fmt.Fprintln(os.Stderr, "error: ANTHROPIC_API_KEY environment variable is required")
-			os.Exit(1)
+		retryAttempts := *llmRetryAttempts
+		if retryAttempts <= 0 {
+			retryAttempts = 1
 		}
-		anthropicLLM := agent.NewAnthropicLLM(*model)
-		llm = anthropicLLM
-		llmModel = anthropicLLM.Model
-		log.Printf("using Anthropic provider (model: %s)", llmModel)
+		llm = agent.NewRetryLLM(llm, agent.RetryOptions{
+			MaxAttempts:       retryAttempts,
+			BaseDelay:         *llmRetryBackoff,
+			PerAttemptTimeout: *llmCallTimeout,
+		})
 	}
+
+	// Build ACP config if needed.
+	var acpCfg *agent.ACPBackendConfig
+	if wikiBackend == "acp" {
+		acpProvider := os.Getenv("ACP_PROVIDER")
+		if acpProvider == "" {
+			fmt.Fprintln(os.Stderr, "error: ACP_PROVIDER is required when WIKI_BACKEND=acp")
+			os.Exit(1)
+		}
+		acpmuxCmd := os.Getenv("ACPMUX_COMMAND")
+		if acpmuxCmd == "" {
+			acpmuxCmd = "acpmux"
+		}
+		turnTimeout := agent.DefaultACPTurnTimeout
+		if raw := os.Getenv("ACP_TURN_TIMEOUT"); raw != "" {
+			if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {
+				turnTimeout = time.Duration(secs) * time.Second
+			}
+		}
+		maxDiffBytes := int64(agent.DefaultACPMaxDiffBytes)
+		if raw := os.Getenv("ACP_MAX_DIFF_BYTES"); raw != "" {
+			if v, err := strconv.ParseInt(raw, 10, 64); err == nil && v > 0 {
+				maxDiffBytes = v
+			}
+		}
+		acpCfg = &agent.ACPBackendConfig{
+			Provider:       acpProvider,
+			AcpmuxCommand:  acpmuxCmd,
+			TurnTimeout:    turnTimeout,
+			MaxDiffBytes:   maxDiffBytes,
+			AdditionalDirs: os.Getenv("ACP_ADDITIONAL_DIRS"),
+		}
+		log.Printf("WIKI_BACKEND=acp (provider: %s, acpmux: %s, turn_timeout: %s)", acpProvider, acpmuxCmd, turnTimeout)
+	}
+
 	retryAttempts := *llmRetryAttempts
 	if retryAttempts <= 0 {
 		retryAttempts = 1
 	}
-	llm = agent.NewRetryLLM(llm, agent.RetryOptions{
-		MaxAttempts:       retryAttempts,
-		BaseDelay:         *llmRetryBackoff,
-		PerAttemptTimeout: *llmCallTimeout,
-	})
+
 	handler, err := api.NewWithOptions(*dataDir, llm, api.Options{
 		MaxToolLoops:                 *maxToolLoops,
 		MaxRepeatedReadOnlyToolCalls: *maxRepeatedReadOnlyToolCalls,
@@ -92,6 +159,9 @@ func runServe(args []string) {
 		LLMProvider:                  llmProvider,
 		LLMModel:                     llmModel,
 		LLMBaseURL:                   llmBaseURL,
+		WikiBackend:                  wikiBackend,
+		QueryBackend:                 queryBackend,
+		ACPConfig:                    acpCfg,
 	})
 	if err != nil {
 		log.Fatalf("init: %v", err)
@@ -102,18 +172,18 @@ func runServe(args []string) {
 	}
 
 	log.Printf("engram9 listening on %s (data: %s)", *addr, *dataDir)
-	log.Printf("engram9 runtime: max_tool_loops=%d max_repeated_read_only_tool_calls=%d max_invalid_tool_calls=%d ingest_timeout=%s max_concurrent_integrations=%d llm_provider=%s llm_model=%s llm_retry_attempts=%d llm_retry_backoff=%s llm_call_timeout=%s",
+	log.Printf("engram9 backends: wiki_backend=%s query_backend=%s", wikiBackend, queryBackend)
+	log.Printf("engram9 runtime: max_tool_loops=%d max_repeated_read_only_tool_calls=%d max_invalid_tool_calls=%d ingest_timeout=%s max_concurrent_integrations=%d",
 		handler.MaxToolLoops(),
 		handler.MaxRepeatedReadOnlyToolCalls(),
 		handler.MaxInvalidToolCalls(),
 		handler.EffectiveIngestTimeout(),
 		handler.MaxConcurrentIntegrations(),
-		llmProvider,
-		llmModel,
-		retryAttempts,
-		*llmRetryBackoff,
-		*llmCallTimeout,
 	)
+	if needLLM {
+		log.Printf("engram9 llm: provider=%s model=%s retry_attempts=%d retry_backoff=%s call_timeout=%s",
+			llmProvider, llmModel, retryAttempts, *llmRetryBackoff, *llmCallTimeout)
+	}
 	if err := http.ListenAndServe(*addr, handler.Routes()); err != nil {
 		log.Fatalf("serve: %v", err)
 	}

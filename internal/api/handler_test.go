@@ -229,6 +229,19 @@ func TestStatusEndpoint(t *testing.T) {
 	if stats.LLMBaseURL != "https://example.invalid/v1" {
 		t.Fatalf("llm_base_url=%q, want https://example.invalid/v1", stats.LLMBaseURL)
 	}
+	// Per-capability backend fields (adversary-1 gate).
+	if stats.IngestBackend != "llm" {
+		t.Fatalf("ingest_backend=%q, want llm", stats.IngestBackend)
+	}
+	if stats.CompileBackend != "llm" {
+		t.Fatalf("compile_backend=%q, want llm", stats.CompileBackend)
+	}
+	if stats.QueryBackend != "llm" {
+		t.Fatalf("query_backend=%q, want llm", stats.QueryBackend)
+	}
+	if stats.ACPProvider != "" {
+		t.Fatalf("acp_provider=%q, want empty for llm backend", stats.ACPProvider)
+	}
 }
 
 func TestCompileEndpoint(t *testing.T) {
@@ -536,5 +549,57 @@ func TestRememberMethodNotAllowed(t *testing.T) {
 
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("status=%d, want 405", resp.StatusCode)
+	}
+}
+
+func TestNewWithOptionsRejectsQueryBackendACP(t *testing.T) {
+	llm := &mockLLM{response: "ok"}
+	_, err := NewWithOptions(t.TempDir(), llm, Options{
+		QueryBackend: "acp",
+	})
+	if err == nil {
+		t.Fatal("expected error for QUERY_BACKEND=acp")
+	}
+	if !strings.Contains(err.Error(), "QUERY_BACKEND=acp is not yet supported") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNewWithOptionsRejectsUnknownWikiBackend(t *testing.T) {
+	llm := &mockLLM{response: "ok"}
+	_, err := NewWithOptions(t.TempDir(), llm, Options{
+		WikiBackend: "magic",
+	})
+	if err == nil {
+		t.Fatal("expected error for unknown WIKI_BACKEND")
+	}
+	if !strings.Contains(err.Error(), "unknown WIKI_BACKEND") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNewWithOptionsRejectsUnknownQueryBackend(t *testing.T) {
+	llm := &mockLLM{response: "ok"}
+	_, err := NewWithOptions(t.TempDir(), llm, Options{
+		QueryBackend: "magic",
+	})
+	if err == nil {
+		t.Fatal("expected error for unknown QUERY_BACKEND")
+	}
+	if !strings.Contains(err.Error(), "unknown QUERY_BACKEND") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNewWithOptionsRejectsACPWithoutConfig(t *testing.T) {
+	llm := &mockLLM{response: "ok"}
+	_, err := NewWithOptions(t.TempDir(), llm, Options{
+		WikiBackend: "acp",
+	})
+	if err == nil {
+		t.Fatal("expected error for WIKI_BACKEND=acp without ACPConfig")
+	}
+	if !strings.Contains(err.Error(), "ACP configuration") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

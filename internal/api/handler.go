@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -17,10 +18,9 @@ import (
 
 // Handler implements the engram9 HTTP API.
 type Handler struct {
-	store   storage.Store
-	ingest  *agent.IngestAgent
-	query   *agent.QueryAgent
-	compile *agent.CompileAgent
+	store        storage.Store
+	wikiBackend  agent.AgentBackend
+	queryBackend agent.AgentBackend
 
 	// compileMu serializes compile requests (only one compile at a time).
 	compileMu sync.Mutex
@@ -51,6 +51,11 @@ type Handler struct {
 	llmProvider      string
 	llmModel         string
 	llmBaseURL       string
+
+	// Per-capability backend identifiers for /status.
+	wikiBackendName  string // "llm" or "acp"
+	queryBackendName string // "llm"
+	acpProvider      string // "claude", "codex" — only when wikiBackendName=="acp"
 }
 
 const (
@@ -72,6 +77,13 @@ type Options struct {
 	LLMProvider                  string
 	LLMModel                     string
 	LLMBaseURL                   string
+
+	// WikiBackend selects the backend for ingest + compile: "llm" (default) or "acp".
+	WikiBackend string
+	// QueryBackend selects the backend for query: "llm" (default). "acp" is not yet supported.
+	QueryBackend string
+	// ACPConfig is required when WikiBackend == "acp".
+	ACPConfig *agent.ACPBackendConfig
 }
 
 // New creates a new API handler with all agents wired up.
@@ -85,7 +97,6 @@ func NewWithOptions(dataDir string, llm agent.LLM, opts Options) (*Handler, erro
 		return nil, err
 	}
 
-	executor := agent.NewToolExecutor(store)
 	maxToolLoops := opts.MaxToolLoops
 	if maxToolLoops <= 0 {
 		maxToolLoops = agent.DefaultMaxToolLoops
@@ -112,11 +123,53 @@ func NewWithOptions(dataDir string, llm agent.LLM, opts Options) (*Handler, erro
 		maxConcurrentIntegrations = maxConcurrentIntegrationsFromEnv()
 	}
 
+	// Resolve wiki backend (ingest + compile).
+	wikiBackendName := opts.WikiBackend
+	if wikiBackendName == "" {
+		wikiBackendName = "llm"
+	}
+
+	var wikiBackend agent.AgentBackend
+	var acpProvider string
+	switch wikiBackendName {
+	case "llm":
+		executor := agent.NewToolExecutor(store)
+		wikiBackend = agent.NewLLMBackend(llm, executor, runnerOpts)
+	case "acp":
+		if opts.ACPConfig == nil {
+			return nil, fmt.Errorf("WIKI_BACKEND=acp requires ACP configuration (ACP_PROVIDER, ACPMUX_COMMAND)")
+		}
+		acpProvider = opts.ACPConfig.Provider
+		acpBackend, err := agent.NewACPBackend(dataDir, *opts.ACPConfig)
+		if err != nil {
+			return nil, fmt.Errorf("init ACP backend: %w", err)
+		}
+		wikiBackend = acpBackend
+	default:
+		return nil, fmt.Errorf("unknown WIKI_BACKEND %q (use 'llm' or 'acp')", wikiBackendName)
+	}
+
+	// Resolve query backend.
+	queryBackendName := opts.QueryBackend
+	if queryBackendName == "" {
+		queryBackendName = "llm"
+	}
+
+	var queryBackend agent.AgentBackend
+	switch queryBackendName {
+	case "llm":
+		executor := agent.NewToolExecutor(store)
+		queryBackend = agent.NewLLMBackend(llm, executor, runnerOpts)
+	case "acp":
+		return nil, fmt.Errorf("QUERY_BACKEND=acp is not yet supported; query ACP requires additional design (session lifecycle, latency, read-only MCP tools)")
+	default:
+		return nil, fmt.Errorf("unknown QUERY_BACKEND %q (use 'llm')", queryBackendName)
+	}
+
 	return &Handler{
 		store:                        store,
-		ingest:                       agent.NewIngestAgentWithOptions(llm, executor, runnerOpts),
-		query:                        agent.NewQueryAgentWithOptions(llm, executor, runnerOpts),
-		compile:                      agent.NewCompileAgentWithOptions(llm, executor, runnerOpts),
+		wikiBackend:                  wikiBackend,
+		queryBackend:                 queryBackend,
 		ingestTimeout:                ingestTimeout,
 		integrationSlots:             make(chan struct{}, maxConcurrentIntegrations),
 		maxConcurrentIntegrations:    maxConcurrentIntegrations,
@@ -129,6 +182,9 @@ func NewWithOptions(dataDir string, llm agent.LLM, opts Options) (*Handler, erro
 		llmProvider:                  opts.LLMProvider,
 		llmModel:                     opts.LLMModel,
 		llmBaseURL:                   opts.LLMBaseURL,
+		wikiBackendName:              wikiBackendName,
+		queryBackendName:             queryBackendName,
+		acpProvider:                  acpProvider,
 	}, nil
 }
 
@@ -240,7 +296,7 @@ func (h *Handler) handleRemember(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(context.Background(), h.effectiveIngestTimeout())
 		defer cancel()
 
-		if err := h.ingest.Integrate(ctx, eventID, req.Text, req.Context); err != nil {
+		if _, err := h.wikiBackend.RunIngest(ctx, eventID, req.Text, req.Context); err != nil {
 			log.Printf("[api] integrate error (event %s): %v", eventID, err)
 			h.ingestErrors.Add(1)
 		} else {
@@ -274,14 +330,14 @@ func (h *Handler) handleRecall(w http.ResponseWriter, r *http.Request) {
 		recentEvents, _ = h.store.ReadRecentEvents(10)
 	}
 
-	result, err := h.query.Recall(r.Context(), req.Question, req.Context, recentEvents)
+	result, err := h.queryBackend.RunQuery(r.Context(), req.Question, req.Context, recentEvents)
 	if err != nil {
 		log.Printf("[api] recall error: %v", err)
 		writeJSON(w, http.StatusInternalServerError, APIResponse{Error: err.Error()})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, APIResponse{Result: result})
+	writeJSON(w, http.StatusOK, APIResponse{Result: result.Answer})
 }
 
 func (h *Handler) handleCompile(w http.ResponseWriter, r *http.Request) {
@@ -293,7 +349,7 @@ func (h *Handler) handleCompile(w http.ResponseWriter, r *http.Request) {
 	cursor := h.store.GetCompileCursor()
 
 	log.Printf("[api] compile: cursor=%d", cursor)
-	result, newCursor, err := h.compile.Compile(r.Context(), cursor)
+	result, err := h.wikiBackend.RunCompile(r.Context(), cursor)
 	if err != nil {
 		log.Printf("[api] compile error: %v", err)
 		writeJSON(w, http.StatusInternalServerError, APIResponse{Error: err.Error()})
@@ -301,6 +357,7 @@ func (h *Handler) handleCompile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Persist new cursor only if progress was made.
+	newCursor := result.NewCursor
 	if newCursor > cursor {
 		if err := h.store.SetCompileCursor(newCursor); err != nil {
 			log.Printf("[api] persist cursor error: %v", err)
@@ -308,7 +365,7 @@ func (h *Handler) handleCompile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("[api] compile done: cursor %d -> %d", cursor, newCursor)
-	writeJSON(w, http.StatusOK, APIResponse{Result: result})
+	writeJSON(w, http.StatusOK, APIResponse{Result: result.Summary})
 }
 
 // StatusResponse extends MemoryStats with runtime info.
@@ -327,6 +384,11 @@ type StatusResponse struct {
 	LLMProvider                  string `json:"llm_provider,omitempty"`
 	LLMModel                     string `json:"llm_model,omitempty"`
 	LLMBaseURL                   string `json:"llm_base_url,omitempty"`
+	// Per-capability backend identifiers.
+	IngestBackend  string `json:"ingest_backend"`
+	CompileBackend string `json:"compile_backend"`
+	QueryBackend   string `json:"query_backend"`
+	ACPProvider    string `json:"acp_provider,omitempty"`
 }
 
 func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -351,6 +413,10 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		LLMProvider:                  h.llmProvider,
 		LLMModel:                     h.llmModel,
 		LLMBaseURL:                   h.llmBaseURL,
+		IngestBackend:                h.wikiBackendName,
+		CompileBackend:               h.wikiBackendName,
+		QueryBackend:                 h.queryBackendName,
+		ACPProvider:                  h.acpProvider,
 	})
 }
 
@@ -432,12 +498,13 @@ func (h *Handler) runCompile(ctx context.Context) {
 	}
 
 	log.Printf("[auto-compile] starting: cursor=%d, uncompiled=%d", cursor, stats.UncompiledCount)
-	_, newCursor, err := h.compile.Compile(ctx, cursor)
+	result, err := h.wikiBackend.RunCompile(ctx, cursor)
 	if err != nil {
 		log.Printf("[auto-compile] error: %v", err)
 		return
 	}
 
+	newCursor := result.NewCursor
 	if newCursor > cursor {
 		if err := h.store.SetCompileCursor(newCursor); err != nil {
 			log.Printf("[auto-compile] persist cursor error: %v", err)
