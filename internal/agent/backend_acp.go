@@ -136,10 +136,17 @@ func (b *ACPBackend) runACPTurn(ctx context.Context, prompt string, valOpts Vali
 	}
 
 	// 2. Spawn acpmux process.
+	// Claude needs ToolSearch to discover MCP tools at runtime, plus Glob/Grep
+	// for read-only file access. Write isolation is enforced by --allowedTools
+	// restricting to engram9 MCP tools only (no Write/Edit/Bash).
 	args := []string{
 		"--provider", b.cfg.Provider,
 		"--provider-arg", "--tools",
-		"--provider-arg", "",
+		"--provider-arg", "ToolSearch,Glob,Grep",
+		"--provider-arg", "--allowedTools",
+		"--provider-arg", "mcp__engram9__read_wiki_index,mcp__engram9__read_wiki_page,mcp__engram9__write_wiki_page,mcp__engram9__search_wiki",
+		"--provider-arg", "--permission-mode",
+		"--provider-arg", "dontAsk",
 		"--provider-arg", "--strict-mcp-config",
 	}
 
@@ -206,6 +213,7 @@ func (b *ACPBackend) runACPTurn(ctx context.Context, prompt string, valOpts Vali
 		ID:      json.RawMessage(`2`),
 		Method:  "session/new",
 		Params: mustMarshal(map[string]any{
+			"cwd": stagingDir,
 			"mcpServers": []map[string]any{
 				{
 					"name":    "engram9",
