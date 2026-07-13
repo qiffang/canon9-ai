@@ -18,9 +18,10 @@ import (
 
 // Handler implements the engram9 HTTP API.
 type Handler struct {
-	store        storage.Store
-	wikiBackend  agent.AgentBackend
-	queryBackend agent.AgentBackend
+	store          storage.Store
+	wikiBackend    agent.AgentBackend // ingest
+	compileBackend agent.AgentBackend // compile (always LLM in Phase 1)
+	queryBackend   agent.AgentBackend
 
 	// compileMu serializes compile requests (only one compile at a time).
 	compileMu sync.Mutex
@@ -123,18 +124,22 @@ func NewWithOptions(dataDir string, llm agent.LLM, opts Options) (*Handler, erro
 		maxConcurrentIntegrations = maxConcurrentIntegrationsFromEnv()
 	}
 
-	// Resolve wiki backend (ingest + compile).
+	// Resolve wiki backend (ingest only in Phase 1).
 	wikiBackendName := opts.WikiBackend
 	if wikiBackendName == "" {
 		wikiBackendName = "llm"
 	}
 
+	// Compile always uses LLM backend in Phase 1 — ACP agent mode does not
+	// expose compile tools (read_events_since, archive_wiki_page, rebuild_index).
+	llmExecutor := agent.NewToolExecutor(store)
+	compileBackend := agent.NewLLMBackend(llm, llmExecutor, runnerOpts)
+
 	var wikiBackend agent.AgentBackend
 	var acpProvider string
 	switch wikiBackendName {
 	case "llm":
-		executor := agent.NewToolExecutor(store)
-		wikiBackend = agent.NewLLMBackend(llm, executor, runnerOpts)
+		wikiBackend = compileBackend // reuse same LLM backend
 	case "acp":
 		if opts.ACPConfig == nil {
 			return nil, fmt.Errorf("WIKI_BACKEND=acp requires ACP configuration (ACP_PROVIDER, ACPMUX_COMMAND)")
@@ -158,8 +163,7 @@ func NewWithOptions(dataDir string, llm agent.LLM, opts Options) (*Handler, erro
 	var queryBackend agent.AgentBackend
 	switch queryBackendName {
 	case "llm":
-		executor := agent.NewToolExecutor(store)
-		queryBackend = agent.NewLLMBackend(llm, executor, runnerOpts)
+		queryBackend = agent.NewLLMBackend(llm, agent.NewToolExecutor(store), runnerOpts)
 	case "acp":
 		return nil, fmt.Errorf("QUERY_BACKEND=acp is not yet supported; query ACP requires additional design (session lifecycle, latency, read-only MCP tools)")
 	default:
@@ -169,6 +173,7 @@ func NewWithOptions(dataDir string, llm agent.LLM, opts Options) (*Handler, erro
 	return &Handler{
 		store:                        store,
 		wikiBackend:                  wikiBackend,
+		compileBackend:               compileBackend,
 		queryBackend:                 queryBackend,
 		ingestTimeout:                ingestTimeout,
 		integrationSlots:             make(chan struct{}, maxConcurrentIntegrations),
@@ -349,7 +354,7 @@ func (h *Handler) handleCompile(w http.ResponseWriter, r *http.Request) {
 	cursor := h.store.GetCompileCursor()
 
 	log.Printf("[api] compile: cursor=%d", cursor)
-	result, err := h.wikiBackend.RunCompile(r.Context(), cursor)
+	result, err := h.compileBackend.RunCompile(r.Context(), cursor)
 	if err != nil {
 		log.Printf("[api] compile error: %v", err)
 		writeJSON(w, http.StatusInternalServerError, APIResponse{Error: err.Error()})
@@ -414,7 +419,7 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		LLMModel:                     h.llmModel,
 		LLMBaseURL:                   h.llmBaseURL,
 		IngestBackend:                h.wikiBackendName,
-		CompileBackend:               h.wikiBackendName,
+		CompileBackend:               "llm", // always LLM in Phase 1
 		QueryBackend:                 h.queryBackendName,
 		ACPProvider:                  h.acpProvider,
 	})
@@ -498,7 +503,7 @@ func (h *Handler) runCompile(ctx context.Context) {
 	}
 
 	log.Printf("[auto-compile] starting: cursor=%d, uncompiled=%d", cursor, stats.UncompiledCount)
-	result, err := h.wikiBackend.RunCompile(ctx, cursor)
+	result, err := h.compileBackend.RunCompile(ctx, cursor)
 	if err != nil {
 		log.Printf("[auto-compile] error: %v", err)
 		return

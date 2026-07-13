@@ -42,6 +42,11 @@ func NewACPBackend(dataDir string, cfg ACPBackendConfig) (*ACPBackend, error) {
 	if cfg.Provider == "" {
 		return nil, fmt.Errorf("ACP_PROVIDER is required")
 	}
+	// Phase 1: only Claude adapter supports MCP server injection via acpmux.
+	// Codex adapter ignores MCPServers today.
+	if cfg.Provider != "claude" {
+		return nil, fmt.Errorf("ACP_PROVIDER=%q is not supported in Phase 1 (only 'claude' has MCP injection)", cfg.Provider)
+	}
 	if cfg.AcpmuxCommand == "" {
 		cfg.AcpmuxCommand = "acpmux"
 	}
@@ -89,46 +94,16 @@ func (b *ACPBackend) RunIngest(ctx context.Context, eventID string, text string,
 	return IngestResult{Summary: summary}, nil
 }
 
-func (b *ACPBackend) RunCompile(ctx context.Context, cursor uint64) (CompileResult, error) {
-	prompt := fmt.Sprintf(`You are the Compile Agent. Run a full compile cycle.
-
-Current compile cursor: %d (call read_events_since with cursor=%d to get unprocessed events).
-
-Execute all three phases:
-1. Distill new events into wiki
-2. Sleep pruning (archive stale pages per memory-type rules)
-3. Rebuild index
-
-Report what you did when finished.`, cursor, cursor)
-	prompt += "\n\n" + compileSystemPrompt
-
-	summary, err := b.runACPTurn(ctx, prompt, ValidateOptions{AllowDelete: true})
-	if err != nil {
-		return CompileResult{}, err
-	}
-	// In ACP mode, cursor tracking from tool results is not available.
-	// Re-derive cursor from event store: count total events as upper bound.
-	newCursor := b.deriveCompileCursor()
-	return CompileResult{Summary: summary, NewCursor: newCursor}, nil
+func (b *ACPBackend) RunCompile(_ context.Context, _ uint64) (CompileResult, error) {
+	// ACP compile is not yet supported: MCP agent mode only exposes wiki tools
+	// (read_wiki_index, read_wiki_page, write_wiki_page, search_wiki) but compile
+	// requires read_events_since, archive_wiki_page, and rebuild_index.
+	// Until a compile-mode MCP tool set is implemented, compile stays on LLM.
+	return CompileResult{}, ErrNotImplemented
 }
 
 func (b *ACPBackend) RunQuery(_ context.Context, _ string, _ map[string]string, _ []storage.Event) (QueryResult, error) {
 	return QueryResult{}, ErrNotImplemented
-}
-
-// deriveCompileCursor reads the event store to determine the cursor after compile.
-// Since ACP compile processes all events via read_events_since, the new cursor
-// is the total event count in the store.
-func (b *ACPBackend) deriveCompileCursor() uint64 {
-	store, err := storage.NewFS(b.dataDir)
-	if err != nil {
-		return 0
-	}
-	stats, err := store.GetMemoryStats()
-	if err != nil || stats == nil {
-		return 0
-	}
-	return uint64(stats.EventCount)
 }
 
 func (b *ACPBackend) Close() error {
@@ -218,17 +193,20 @@ func (b *ACPBackend) runACPTurn(ctx context.Context, prompt string, valOpts Vali
 	}
 
 	// 4. Send session/new with MCP config.
-	mcpConfig := map[string]any{
-		"command": "engram9-mcp",
-		"args":    []string{"-data", stagingDir, "-mode", "agent"},
-	}
+	// acpmux expects MCP server fields at top level (type, name, command, args),
+	// NOT nested under a "transport" key.
 	sessionReq := acpRequest{
 		JSONRPC: "2.0",
 		ID:      json.RawMessage(`2`),
 		Method:  "session/new",
 		Params: mustMarshal(map[string]any{
 			"mcpServers": []map[string]any{
-				{"name": "engram9", "transport": mcpConfig},
+				{
+					"name":    "engram9",
+					"type":    "stdio",
+					"command": "engram9-mcp",
+					"args":    []string{"-data", stagingDir, "-mode", "agent"},
+				},
 			},
 		}),
 	}

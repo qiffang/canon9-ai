@@ -70,8 +70,12 @@ func (v *WikiValidator) Validate(prodDir, stagingDir string, opts ...ValidateOpt
 			return err
 		}
 
-		// Only validate .md files in wiki.
+		// Only .md files are allowed in wiki. Reject anything else.
 		if !strings.HasSuffix(relPath, ".md") {
+			violations = append(violations, Violation{
+				Path:    relPath,
+				Message: "non-Markdown file in wiki (only .md files are allowed)",
+			})
 			return nil
 		}
 

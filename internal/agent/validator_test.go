@@ -191,6 +191,28 @@ func TestWikiValidatorAllowsDeleteWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestWikiValidatorRejectsNonMarkdownFiles(t *testing.T) {
+	prod := t.TempDir()
+	staging := t.TempDir()
+
+	writeTestFile(t, staging, "wiki/semantic/foo.txt", "not markdown")
+
+	v := NewWikiValidator(DefaultACPMaxDiffBytes)
+	violations, err := v.Validate(prod, staging)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, vi := range violations {
+		if vi.Path == "semantic/foo.txt" && contains(vi.Message, "non-Markdown") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected non-Markdown violation for semantic/foo.txt, got %v", violations)
+	}
+}
+
 func TestIsValidWikiPath(t *testing.T) {
 	tests := []struct {
 		path string
