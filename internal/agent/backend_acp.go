@@ -136,14 +136,10 @@ func (b *ACPBackend) runACPTurn(ctx context.Context, prompt string, valOpts Vali
 	}
 
 	// 2. Spawn acpmux process.
-	args := []string{
-		"--provider", b.cfg.Provider,
-		"--provider-arg", "--tools",
-		"--provider-arg", "",
-		"--provider-arg", "--strict-mcp-config",
-	}
-
-	cmd := exec.CommandContext(ctx, b.cfg.AcpmuxCommand, args...)
+	// Claude needs ToolSearch to discover MCP tools at runtime, plus Glob/Grep
+	// for read-only file access. Write isolation is enforced by --allowedTools
+	// restricting to engram9 MCP tools only (no Write/Edit/Bash).
+	cmd := exec.CommandContext(ctx, b.cfg.AcpmuxCommand, acpmuxArgs(b.cfg.Provider)...)
 	cmd.Stderr = os.Stderr
 
 	stdin, err := cmd.StdinPipe()
@@ -174,15 +170,19 @@ func (b *ACPBackend) runACPTurn(ctx context.Context, prompt string, valOpts Vali
 		ID:      json.RawMessage(`1`),
 		Method:  "initialize",
 		Params: mustMarshal(map[string]any{
-			"protocolVersion": "2024-11-05",
+			"protocolVersion": 1,
 			"clientInfo":      map[string]string{"name": "engram9", "version": "0.1.0"},
 		}),
 	}
 	if err := sendACPRequest(stdin, initReq); err != nil {
 		return "", fmt.Errorf("send initialize: %w", err)
 	}
-	if _, err := readACPResponse(scanner); err != nil {
+	initResp, err := readACPResponseForID(scanner, "1")
+	if err != nil {
 		return "", fmt.Errorf("initialize response: %w", err)
+	}
+	if initResp.Error != nil {
+		return "", fmt.Errorf("initialize failed: ACP error %d: %s", initResp.Error.Code, initResp.Error.Message)
 	}
 
 	// Send initialized notification.
@@ -197,27 +197,16 @@ func (b *ACPBackend) runACPTurn(ctx context.Context, prompt string, valOpts Vali
 	// 4. Send session/new with MCP config.
 	// acpmux expects MCP server fields at top level (type, name, command, args),
 	// NOT nested under a "transport" key.
-	sessionReq := acpRequest{
-		JSONRPC: "2.0",
-		ID:      json.RawMessage(`2`),
-		Method:  "session/new",
-		Params: mustMarshal(map[string]any{
-			"mcpServers": []map[string]any{
-				{
-					"name":    "engram9",
-					"type":    "stdio",
-					"command": "engram9-mcp",
-					"args":    []string{"-data", stagingDir, "-mode", "agent"},
-				},
-			},
-		}),
-	}
+	sessionReq := newACPSessionRequest(stagingDir)
 	if err := sendACPRequest(stdin, sessionReq); err != nil {
 		return "", fmt.Errorf("send session/new: %w", err)
 	}
-	sessionResp, err := readACPResponse(scanner)
+	sessionResp, err := readACPResponseForID(scanner, "2")
 	if err != nil {
 		return "", fmt.Errorf("session/new response: %w", err)
+	}
+	if sessionResp.Error != nil {
+		return "", fmt.Errorf("session/new failed: ACP error %d: %s", sessionResp.Error.Code, sessionResp.Error.Message)
 	}
 
 	// Extract session ID.
@@ -325,6 +314,38 @@ type acpError struct {
 	Message string `json:"message"`
 }
 
+func acpmuxArgs(provider string) []string {
+	return []string{
+		"--provider", provider,
+		"--provider-arg", "--tools",
+		"--provider-arg", "ToolSearch,Glob,Grep",
+		"--provider-arg", "--allowedTools",
+		"--provider-arg", "mcp__engram9__read_wiki_index,mcp__engram9__read_wiki_page,mcp__engram9__write_wiki_page,mcp__engram9__search_wiki",
+		"--provider-arg", "--permission-mode",
+		"--provider-arg", "dontAsk",
+		"--provider-arg", "--strict-mcp-config",
+	}
+}
+
+func newACPSessionRequest(stagingDir string) acpRequest {
+	return acpRequest{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage(`2`),
+		Method:  "session/new",
+		Params: mustMarshal(map[string]any{
+			"cwd": stagingDir,
+			"mcpServers": []map[string]any{
+				{
+					"name":    "engram9",
+					"type":    "stdio",
+					"command": "engram9-mcp",
+					"args":    []string{"-data", stagingDir, "-mode", "agent"},
+				},
+			},
+		}),
+	}
+}
+
 func sendACPRequest(w io.Writer, req acpRequest) error {
 	data, err := json.Marshal(req)
 	if err != nil {
@@ -332,6 +353,40 @@ func sendACPRequest(w io.Writer, req acpRequest) error {
 	}
 	_, err = fmt.Fprintf(w, "%s\n", data)
 	return err
+}
+
+// readACPResponseForID reads lines until it finds a response matching the
+// expected request ID. Notifications (no ID) and responses with non-matching
+// IDs are logged and skipped. This prevents a stale response or notification
+// from being mistaken for a handshake response.
+func readACPResponseForID(scanner *bufio.Scanner, expectedID string) (*acpResponse, error) {
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var resp acpResponse
+		if err := json.Unmarshal([]byte(line), &resp); err != nil {
+			continue
+		}
+		// Skip notifications (no ID).
+		if resp.ID == nil {
+			if resp.Method != "" {
+				log.Printf("[acp] notification during handshake: %s", resp.Method)
+			}
+			continue
+		}
+		// Check ID matches.
+		respID := strings.Trim(string(resp.ID), `"`)
+		if respID == expectedID {
+			return &resp, nil
+		}
+		log.Printf("[acp] unexpected response id=%s (want %s), skipping", respID, expectedID)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return nil, io.EOF
 }
 
 func readACPResponse(scanner *bufio.Scanner) (*acpResponse, error) {
