@@ -82,7 +82,7 @@ func (b *ACPBackend) RunIngest(ctx context.Context, eventID string, text string,
 	}
 	prompt += "\n\n" + integrateSystemPrompt
 
-	summary, err := b.runACPTurn(ctx, prompt)
+	summary, err := b.runACPTurn(ctx, prompt, ValidateOptions{AllowDelete: false})
 	if err != nil {
 		return IngestResult{}, err
 	}
@@ -102,17 +102,33 @@ Execute all three phases:
 Report what you did when finished.`, cursor, cursor)
 	prompt += "\n\n" + compileSystemPrompt
 
-	summary, err := b.runACPTurn(ctx, prompt)
+	summary, err := b.runACPTurn(ctx, prompt, ValidateOptions{AllowDelete: true})
 	if err != nil {
 		return CompileResult{}, err
 	}
 	// In ACP mode, cursor tracking from tool results is not available.
-	// The caller must detect progress through other means (e.g. checking wiki state).
-	return CompileResult{Summary: summary, NewCursor: 0}, nil
+	// Re-derive cursor from event store: count total events as upper bound.
+	newCursor := b.deriveCompileCursor()
+	return CompileResult{Summary: summary, NewCursor: newCursor}, nil
 }
 
 func (b *ACPBackend) RunQuery(_ context.Context, _ string, _ map[string]string, _ []storage.Event) (QueryResult, error) {
 	return QueryResult{}, ErrNotImplemented
+}
+
+// deriveCompileCursor reads the event store to determine the cursor after compile.
+// Since ACP compile processes all events via read_events_since, the new cursor
+// is the total event count in the store.
+func (b *ACPBackend) deriveCompileCursor() uint64 {
+	store, err := storage.NewFS(b.dataDir)
+	if err != nil {
+		return 0
+	}
+	stats, err := store.GetMemoryStats()
+	if err != nil || stats == nil {
+		return 0
+	}
+	return uint64(stats.EventCount)
 }
 
 func (b *ACPBackend) Close() error {
@@ -126,7 +142,7 @@ func (b *ACPBackend) Close() error {
 // 4. Wait for completion
 // 5. Validate staging wiki
 // 6. Merge staging -> production
-func (b *ACPBackend) runACPTurn(ctx context.Context, prompt string) (string, error) {
+func (b *ACPBackend) runACPTurn(ctx context.Context, prompt string, valOpts ValidateOptions) (string, error) {
 	// Apply turn timeout.
 	ctx, cancel := context.WithTimeout(ctx, b.cfg.TurnTimeout)
 	defer cancel()
@@ -286,7 +302,7 @@ func (b *ACPBackend) runACPTurn(ctx context.Context, prompt string) (string, err
 	}
 
 	// 7. Validate staging wiki.
-	violations, err := b.validator.Validate(b.dataDir, stagingDir)
+	violations, err := b.validator.Validate(b.dataDir, stagingDir, valOpts)
 	if err != nil {
 		return "", fmt.Errorf("validate staging: %w", err)
 	}
@@ -389,7 +405,10 @@ func copyDir(src, dst string) error {
 	})
 }
 
-// mergeWiki copies staging wiki/ directory to production wiki/ directory.
+// mergeWiki atomically replaces the production wiki/ with the staging wiki/.
+// It copies staging wiki to a temp directory next to production, then renames
+// the old wiki to a backup, renames the new wiki into place, and removes the
+// backup. If any step fails after backup rename, the backup is restored.
 func mergeWiki(stagingDir, prodDir string) error {
 	stagingWiki := filepath.Join(stagingDir, "wiki")
 	prodWiki := filepath.Join(prodDir, "wiki")
@@ -399,26 +418,41 @@ func mergeWiki(stagingDir, prodDir string) error {
 		return nil // nothing to merge
 	}
 
-	return filepath.Walk(stagingWiki, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
+	// Copy staging wiki to a temp dir adjacent to production (same filesystem for rename).
+	tmpWiki := prodWiki + ".merging"
+	if err := os.RemoveAll(tmpWiki); err != nil {
+		return fmt.Errorf("clean merge temp: %w", err)
+	}
+	if err := copyDir(stagingWiki, tmpWiki); err != nil {
+		os.RemoveAll(tmpWiki)
+		return fmt.Errorf("copy staging to merge temp: %w", err)
+	}
 
-		relPath, err := filepath.Rel(stagingWiki, path)
-		if err != nil {
-			return err
+	// If production wiki exists, rename it to backup before swapping.
+	backupWiki := prodWiki + ".backup"
+	_ = os.RemoveAll(backupWiki)
+	hadProd := false
+	if _, err := os.Stat(prodWiki); err == nil {
+		if err := os.Rename(prodWiki, backupWiki); err != nil {
+			os.RemoveAll(tmpWiki)
+			return fmt.Errorf("backup prod wiki: %w", err)
 		}
-		dstPath := filepath.Join(prodWiki, relPath)
+		hadProd = true
+	}
 
-		if info.IsDir() {
-			return os.MkdirAll(dstPath, info.Mode())
+	// Rename new wiki into place.
+	if err := os.Rename(tmpWiki, prodWiki); err != nil {
+		// Restore backup if rename failed.
+		if hadProd {
+			_ = os.Rename(backupWiki, prodWiki)
 		}
+		return fmt.Errorf("rename merge temp to prod: %w", err)
+	}
 
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(dstPath, data, info.Mode())
-	})
+	// Clean up backup.
+	if hadProd {
+		_ = os.RemoveAll(backupWiki)
+	}
+	return nil
 }
 

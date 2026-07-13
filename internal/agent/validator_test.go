@@ -170,6 +170,27 @@ func TestWikiValidatorRejectsDeletedPages(t *testing.T) {
 	}
 }
 
+func TestWikiValidatorAllowsDeleteWhenEnabled(t *testing.T) {
+	prod := t.TempDir()
+	staging := t.TempDir()
+
+	writeTestFile(t, prod, "wiki/semantic/a.md", validFrontmatter)
+	writeTestFile(t, prod, "wiki/semantic/b.md", validFrontmatter)
+	// Staging only has a.md — b.md is "deleted". With AllowDelete=true, no violation.
+	writeTestFile(t, staging, "wiki/semantic/a.md", validFrontmatter)
+
+	v := NewWikiValidator(DefaultACPMaxDiffBytes)
+	violations, err := v.Validate(prod, staging, ValidateOptions{AllowDelete: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, vi := range violations {
+		if contains(vi.Message, "deleted") {
+			t.Fatalf("expected no deleted page violation with AllowDelete=true, got: %v", vi)
+		}
+	}
+}
+
 func TestIsValidWikiPath(t *testing.T) {
 	tests := []struct {
 		path string

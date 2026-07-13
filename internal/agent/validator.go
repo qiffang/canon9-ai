@@ -33,9 +33,19 @@ func NewWikiValidator(maxDiffBytes int64) *WikiValidator {
 	return &WikiValidator{maxDiffBytes: maxDiffBytes}
 }
 
+// ValidateOptions controls validation behavior per turn type.
+type ValidateOptions struct {
+	// AllowDelete permits page deletion in staging (true for compile/prune, false for ingest).
+	AllowDelete bool
+}
+
 // Validate compares staging wiki against production wiki and returns violations.
 // Returns nil if validation passes.
-func (v *WikiValidator) Validate(prodDir, stagingDir string) ([]Violation, error) {
+func (v *WikiValidator) Validate(prodDir, stagingDir string, opts ...ValidateOptions) ([]Violation, error) {
+	var opt ValidateOptions
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
 	stagingWiki := filepath.Join(stagingDir, "wiki")
 	prodWiki := filepath.Join(prodDir, "wiki")
 
@@ -111,28 +121,30 @@ func (v *WikiValidator) Validate(prodDir, stagingDir string) ([]Violation, error
 		})
 	}
 
-	// Check that no production pages were deleted in staging.
-	if _, err := os.Stat(prodWiki); err == nil {
-		err := filepath.Walk(prodWiki, func(path string, info os.FileInfo, err error) error {
-			if err != nil || info.IsDir() {
-				return err
-			}
-			if !strings.HasSuffix(path, ".md") {
-				return nil
-			}
+	// Check that no production pages were deleted in staging (unless allowed for compile/prune).
+	if !opt.AllowDelete {
+		if _, err := os.Stat(prodWiki); err == nil {
+			err := filepath.Walk(prodWiki, func(path string, info os.FileInfo, err error) error {
+				if err != nil || info.IsDir() {
+					return err
+				}
+				if !strings.HasSuffix(path, ".md") {
+					return nil
+				}
 
-			relPath, _ := filepath.Rel(prodWiki, path)
-			stagingPath := filepath.Join(stagingWiki, relPath)
-			if _, err := os.Stat(stagingPath); os.IsNotExist(err) {
-				violations = append(violations, Violation{
-					Path:    relPath,
-					Message: "page deleted in staging (ingest should not delete pages)",
-				})
+				relPath, _ := filepath.Rel(prodWiki, path)
+				stagingPath := filepath.Join(stagingWiki, relPath)
+				if _, err := os.Stat(stagingPath); os.IsNotExist(err) {
+					violations = append(violations, Violation{
+						Path:    relPath,
+						Message: "page deleted in staging (ingest should not delete pages)",
+					})
+				}
+				return nil
+			})
+			if err != nil {
+				return nil, fmt.Errorf("walk prod wiki: %w", err)
 			}
-			return nil
-		})
-		if err != nil {
-			return nil, fmt.Errorf("walk prod wiki: %w", err)
 		}
 	}
 
