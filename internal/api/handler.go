@@ -23,8 +23,11 @@ type Handler struct {
 	compileBackend agent.AgentBackend // compile (always LLM in Phase 1)
 	queryBackend   agent.AgentBackend
 
-	// compileMu serializes compile requests (only one compile at a time).
-	compileMu sync.Mutex
+	// wikiMu serializes all wiki-mutating operations: compile turns and ACP
+	// ingest turns. ACP ingest snapshots the entire data dir and replaces wiki/
+	// atomically — concurrent compile or ACP ingest writes would be lost.
+	// LLM ingest uses per-file writes via ToolExecutor and does not need this lock.
+	wikiMu sync.Mutex
 
 	// pendingIntegrations tracks the number of async wiki integrations in flight.
 	pendingIntegrations atomic.Int64
@@ -301,6 +304,14 @@ func (h *Handler) handleRemember(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(context.Background(), h.effectiveIngestTimeout())
 		defer cancel()
 
+		// ACP ingest snapshots the entire data dir and replaces wiki/ atomically.
+		// Hold wikiMu to prevent concurrent compile or other ACP turns from racing.
+		// LLM ingest uses per-file writes and doesn't need this lock.
+		if h.wikiBackendName == "acp" {
+			h.wikiMu.Lock()
+			defer h.wikiMu.Unlock()
+		}
+
 		if _, err := h.wikiBackend.RunIngest(ctx, eventID, req.Text, req.Context); err != nil {
 			log.Printf("[api] integrate error (event %s): %v", eventID, err)
 			h.ingestErrors.Add(1)
@@ -347,8 +358,8 @@ func (h *Handler) handleRecall(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleCompile(w http.ResponseWriter, r *http.Request) {
 	// Only one compile at a time.
-	h.compileMu.Lock()
-	defer h.compileMu.Unlock()
+	h.wikiMu.Lock()
+	defer h.wikiMu.Unlock()
 
 	// Read cursor from persistent storage — single source of truth.
 	cursor := h.store.GetCompileCursor()
@@ -493,8 +504,8 @@ func maxConcurrentIntegrationsFromEnv() int {
 
 // runCompile executes a single compile cycle. Safe for concurrent use (serialized by compileMu).
 func (h *Handler) runCompile(ctx context.Context) {
-	h.compileMu.Lock()
-	defer h.compileMu.Unlock()
+	h.wikiMu.Lock()
+	defer h.wikiMu.Unlock()
 
 	cursor := h.store.GetCompileCursor()
 	stats, _ := h.store.GetMemoryStats()
