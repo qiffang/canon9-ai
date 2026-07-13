@@ -23,7 +23,7 @@ const (
 
 // ACPBackendConfig holds configuration for the ACP backend.
 type ACPBackendConfig struct {
-	Provider       string        // "claude", "codex"
+	Provider       string        // "claude" (Phase 1; codex pending MCP injection support)
 	AcpmuxCommand  string        // path to acpmux binary (default: "acpmux")
 	TurnTimeout    time.Duration // per-turn timeout (default: 10m)
 	MaxDiffBytes   int64         // max bytes changed per turn (default: 1MB)

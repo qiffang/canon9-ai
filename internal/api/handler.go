@@ -56,7 +56,7 @@ type Handler struct {
 	// Per-capability backend identifiers for /status.
 	wikiBackendName  string // "llm" or "acp"
 	queryBackendName string // "llm"
-	acpProvider      string // "claude", "codex" — only when wikiBackendName=="acp"
+	acpProvider      string // "claude" (Phase 1) — only when wikiBackendName=="acp"
 }
 
 const (
