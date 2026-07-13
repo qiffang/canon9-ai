@@ -174,15 +174,19 @@ func (b *ACPBackend) runACPTurn(ctx context.Context, prompt string, valOpts Vali
 		ID:      json.RawMessage(`1`),
 		Method:  "initialize",
 		Params: mustMarshal(map[string]any{
-			"protocolVersion": "2024-11-05",
+			"protocolVersion": 1,
 			"clientInfo":      map[string]string{"name": "engram9", "version": "0.1.0"},
 		}),
 	}
 	if err := sendACPRequest(stdin, initReq); err != nil {
 		return "", fmt.Errorf("send initialize: %w", err)
 	}
-	if _, err := readACPResponse(scanner); err != nil {
+	initResp, err := readACPResponse(scanner)
+	if err != nil {
 		return "", fmt.Errorf("initialize response: %w", err)
+	}
+	if initResp.Error != nil {
+		return "", fmt.Errorf("initialize failed: ACP error %d: %s", initResp.Error.Code, initResp.Error.Message)
 	}
 
 	// Send initialized notification.
@@ -218,6 +222,9 @@ func (b *ACPBackend) runACPTurn(ctx context.Context, prompt string, valOpts Vali
 	sessionResp, err := readACPResponse(scanner)
 	if err != nil {
 		return "", fmt.Errorf("session/new response: %w", err)
+	}
+	if sessionResp.Error != nil {
+		return "", fmt.Errorf("session/new failed: ACP error %d: %s", sessionResp.Error.Code, sessionResp.Error.Message)
 	}
 
 	// Extract session ID.
