@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -601,5 +602,89 @@ func TestNewWithOptionsRejectsACPWithoutConfig(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ACP configuration") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestWikiMuSerializesACPIngestCompileRecall verifies that when wikiBackendName
+// is "acp", concurrent ingest, compile, and recall operations are serialized by
+// wikiMu — no two wiki-mutating operations run at the same time.
+// This is a regression test for the cross-backend lost-update race.
+func TestWikiMuSerializesACPIngestCompileRecall(t *testing.T) {
+	llm := &activeCountingLLM{delay: 20 * time.Millisecond}
+	h, err := NewWithOptions(t.TempDir(), llm, Options{
+		IngestTimeout:             2 * time.Second,
+		MaxConcurrentIntegrations: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate ACP backend by setting wikiBackendName to "acp".
+	// The actual backends remain LLM-based for testability — what matters
+	// is that the handler's lock paths are activated.
+	h.wikiBackendName = "acp"
+
+	srv := httptest.NewServer(h.Routes())
+	defer srv.Close()
+	defer h.Wait()
+
+	var wg sync.WaitGroup
+
+	// Fire concurrent ingest requests.
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			resp, err := http.Post(srv.URL+"/remember",
+				"application/json",
+				strings.NewReader(fmt.Sprintf(`{"text":"event %d"}`, n)))
+			if err != nil {
+				t.Errorf("remember %d: %v", n, err)
+				return
+			}
+			_ = resp.Body.Close()
+		}(i)
+	}
+
+	// Fire concurrent compile requests.
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := http.Post(srv.URL+"/compile",
+				"application/json",
+				strings.NewReader(`{}`))
+			if err != nil {
+				t.Errorf("compile: %v", err)
+				return
+			}
+			_ = resp.Body.Close()
+		}()
+	}
+
+	// Fire concurrent recall requests.
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := http.Post(srv.URL+"/recall",
+				"application/json",
+				strings.NewReader(`{"question":"test?"}`))
+			if err != nil {
+				t.Errorf("recall: %v", err)
+				return
+			}
+			_ = resp.Body.Close()
+		}()
+	}
+
+	// Wait for synchronous requests to finish, then wait for async ingests.
+	wg.Wait()
+	h.Wait()
+
+	// With ACP mode, all wiki-mutating operations should serialize.
+	// The mock LLM's maxActive should be 1 (no concurrent wiki mutations).
+	if got := llm.maxActive.Load(); got != 1 {
+		t.Fatalf("max concurrent wiki-mutating operations=%d, want 1 (wikiMu not serializing)", got)
 	}
 }

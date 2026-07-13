@@ -23,9 +23,10 @@ type Handler struct {
 	compileBackend agent.AgentBackend // compile (always LLM in Phase 1)
 	queryBackend   agent.AgentBackend
 
-	// wikiMu serializes all wiki-mutating operations: compile turns and ACP
-	// ingest turns. ACP ingest snapshots the entire data dir and replaces wiki/
-	// atomically — concurrent compile or ACP ingest writes would be lost.
+	// wikiMu serializes all wiki-mutating operations: compile turns, ACP
+	// ingest turns, and query/recall turns (QueryTools includes write_wiki_page).
+	// ACP ingest snapshots the entire data dir and replaces wiki/ atomically —
+	// concurrent compile, query, or ACP ingest writes would be lost.
 	// LLM ingest uses per-file writes via ToolExecutor and does not need this lock.
 	wikiMu sync.Mutex
 
@@ -340,6 +341,13 @@ func (h *Handler) handleRecall(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[api] recall: %s", truncate(req.Question, 80))
 
+	// QueryTools includes write_wiki_page — if ACP ingest is active, a concurrent
+	// query write would be lost when ACP replaces wiki/ atomically. Hold wikiMu.
+	if h.wikiBackendName == "acp" {
+		h.wikiMu.Lock()
+		defer h.wikiMu.Unlock()
+	}
+
 	// Inject recent events so the LLM can answer even if wiki integration is still pending.
 	var recentEvents []storage.Event
 	if h.pendingIntegrations.Load() > 0 {
@@ -502,7 +510,7 @@ func maxConcurrentIntegrationsFromEnv() int {
 	return maxConcurrent
 }
 
-// runCompile executes a single compile cycle. Safe for concurrent use (serialized by compileMu).
+// runCompile executes a single compile cycle. Safe for concurrent use (serialized by wikiMu).
 func (h *Handler) runCompile(ctx context.Context) {
 	h.wikiMu.Lock()
 	defer h.wikiMu.Unlock()
