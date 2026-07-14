@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/qiffang/engram9/internal/storage"
 	"github.com/stretchr/testify/require"
@@ -79,4 +80,206 @@ func TestReadEventsSince_TotalSizeUnder10MB(t *testing.T) {
 	// Total result must be under 10MB (OpenAI per-message limit)
 	require.Less(t, len(result), 10*1024*1024,
 		"result size %d exceeds 10MB limit", len(result))
+}
+
+func newTestStore(t *testing.T) storage.Store {
+	t.Helper()
+	dir := t.TempDir()
+	s, err := storage.NewFS(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func TestWriteWikiPage_ValidPaths(t *testing.T) {
+	te := NewToolExecutor(newTestStore(t))
+
+	validPaths := []string{
+		"semantic/test.md",
+		"episodic/2026-07-14/event.md",
+		"procedural/deploy.md",
+		"prospective/goal.md",
+		"index.md",
+	}
+	for _, path := range validPaths {
+		input, _ := json.Marshal(map[string]string{
+			"path":    path,
+			"content": "# Test\n\nSome content.",
+		})
+		result, err := te.Execute("write_wiki_page", input)
+		if err != nil {
+			t.Errorf("valid path %q rejected: %v", path, err)
+			continue
+		}
+		if !strings.Contains(result, `"status": "ok"`) {
+			t.Errorf("valid path %q: unexpected result %s", path, result)
+		}
+	}
+}
+
+func TestWriteWikiPage_InvalidPaths(t *testing.T) {
+	te := NewToolExecutor(newTestStore(t))
+
+	invalidPaths := []string{
+		"MEMORY.md",
+		"notes.md",
+		"archive/old.md",
+		"config/settings.md",
+		".meta/something",
+	}
+	for _, path := range invalidPaths {
+		input, _ := json.Marshal(map[string]string{
+			"path":    path,
+			"content": "# Test",
+		})
+		_, err := te.Execute("write_wiki_page", input)
+		if err == nil {
+			t.Errorf("invalid path %q was accepted, should have been rejected", path)
+			continue
+		}
+		if !strings.Contains(err.Error(), "invalid wiki path") {
+			t.Errorf("invalid path %q: expected 'invalid wiki path' error, got: %v", path, err)
+		}
+	}
+}
+
+func TestWriteWikiPage_FrontmatterInjection(t *testing.T) {
+	store := newTestStore(t)
+	te := NewToolExecutor(store)
+
+	input, _ := json.Marshal(map[string]string{
+		"path":    "semantic/test.md",
+		"content": "# Test\n\nSome content.",
+	})
+	_, err := te.Execute("write_wiki_page", input)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page, err := store.ReadWikiPage("semantic/test.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(page.Content, "<!-- compiled_from:") {
+		t.Error("expected compiled_from frontmatter to be injected")
+	}
+	if !strings.Contains(page.Content, "<!-- last_compiled:") {
+		t.Error("expected last_compiled frontmatter to be injected")
+	}
+}
+
+func TestWriteWikiPage_ExistingFrontmatterPreserved(t *testing.T) {
+	store := newTestStore(t)
+	te := NewToolExecutor(store)
+
+	content := "<!-- compiled_from: evt_001 -->\n<!-- last_compiled: 2026-07-14T00:00:00Z -->\n# Test\n\nExisting."
+	input, _ := json.Marshal(map[string]string{
+		"path":    "semantic/existing.md",
+		"content": content,
+	})
+	_, err := te.Execute("write_wiki_page", input)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page, err := store.ReadWikiPage("semantic/existing.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(page.Content, "<!-- compiled_from:") != 1 {
+		t.Errorf("expected exactly 1 compiled_from, got %d", strings.Count(page.Content, "<!-- compiled_from:"))
+	}
+	if strings.Count(page.Content, "<!-- last_compiled:") != 1 {
+		t.Errorf("expected exactly 1 last_compiled, got %d", strings.Count(page.Content, "<!-- last_compiled:"))
+	}
+	if !strings.Contains(page.Content, "evt_001") {
+		t.Error("original compiled_from value should be preserved")
+	}
+}
+
+func TestWriteWikiPage_SourceEventsInFrontmatter(t *testing.T) {
+	store := newTestStore(t)
+	te := NewToolExecutor(store)
+
+	input, _ := json.Marshal(map[string]interface{}{
+		"path":          "semantic/sourced.md",
+		"content":       "# Sourced\n\nContent [evt_042 T1]",
+		"source_events": []string{"evt_042", "evt_055"},
+	})
+	_, err := te.Execute("write_wiki_page", input)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page, err := store.ReadWikiPage("semantic/sourced.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(page.Content, "<!-- compiled_from: evt_042, evt_055 -->") {
+		t.Errorf("expected source events in compiled_from, got: %s", page.Content)
+	}
+}
+
+func TestIsValidWikiPath(t *testing.T) {
+	tests := []struct {
+		path  string
+		valid bool
+	}{
+		{"semantic/test.md", true},
+		{"episodic/2026-07-14/event.md", true},
+		{"procedural/deploy.md", true},
+		{"prospective/goal.md", true},
+		{"index.md", true},
+		{"semantic/nested/deep/page.md", true},
+		{"MEMORY.md", false},
+		{"notes.md", false},
+		{"archive/old.md", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := IsValidWikiPath(tt.path); got != tt.valid {
+			t.Errorf("IsValidWikiPath(%q) = %v, want %v", tt.path, got, tt.valid)
+		}
+	}
+}
+
+func TestEnsureFrontmatter(t *testing.T) {
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+
+	t.Run("injects both when missing", func(t *testing.T) {
+		result := EnsureFrontmatter("# Title\n\nContent", nil, now)
+		if !strings.HasPrefix(result, "<!-- compiled_from: ingest -->") {
+			t.Errorf("expected compiled_from: ingest prefix, got: %s", result)
+		}
+		if !strings.Contains(result, "<!-- last_compiled: 2026-07-14T12:00:00Z -->") {
+			t.Errorf("expected last_compiled timestamp, got: %s", result)
+		}
+	})
+
+	t.Run("uses source events when provided", func(t *testing.T) {
+		result := EnsureFrontmatter("# Title", []string{"evt_1", "evt_2"}, now)
+		if !strings.Contains(result, "<!-- compiled_from: evt_1, evt_2 -->") {
+			t.Errorf("expected source events, got: %s", result)
+		}
+	})
+
+	t.Run("preserves existing frontmatter", func(t *testing.T) {
+		content := "<!-- compiled_from: evt_old -->\n<!-- last_compiled: 2026-01-01T00:00:00Z -->\n# Title"
+		result := EnsureFrontmatter(content, nil, now)
+		if result != content {
+			t.Errorf("expected content unchanged, got: %s", result)
+		}
+	})
+
+	t.Run("injects only missing fields", func(t *testing.T) {
+		content := "<!-- compiled_from: evt_old -->\n# Title"
+		result := EnsureFrontmatter(content, nil, now)
+		if !strings.Contains(result, "<!-- last_compiled: 2026-07-14T12:00:00Z -->") {
+			t.Errorf("expected last_compiled injected, got: %s", result)
+		}
+		if strings.Count(result, "<!-- compiled_from:") != 1 {
+			t.Error("compiled_from should not be duplicated")
+		}
+	})
 }
