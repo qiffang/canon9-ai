@@ -124,22 +124,6 @@ func (te *ToolExecutor) searchWiki(input json.RawMessage) (string, error) {
 	return string(data), nil
 }
 
-// ValidWikiPrefixes are the allowed top-level directories for wiki pages.
-var ValidWikiPrefixes = []string{"semantic/", "episodic/", "procedural/", "prospective/"}
-
-// IsValidWikiPath checks whether a path is a valid wiki page location.
-func IsValidWikiPath(path string) bool {
-	if path == "index.md" {
-		return true
-	}
-	for _, prefix := range ValidWikiPrefixes {
-		if strings.HasPrefix(path, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
 // EnsureFrontmatter injects compiled_from and last_compiled frontmatter
 // comments if they are missing from the content.
 func EnsureFrontmatter(content string, sourceEvents []string, now time.Time) string {

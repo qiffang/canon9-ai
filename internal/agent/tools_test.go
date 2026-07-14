@@ -221,29 +221,6 @@ func TestWriteWikiPage_SourceEventsInFrontmatter(t *testing.T) {
 	}
 }
 
-func TestIsValidWikiPath(t *testing.T) {
-	tests := []struct {
-		path  string
-		valid bool
-	}{
-		{"semantic/test.md", true},
-		{"episodic/2026-07-14/event.md", true},
-		{"procedural/deploy.md", true},
-		{"prospective/goal.md", true},
-		{"index.md", true},
-		{"semantic/nested/deep/page.md", true},
-		{"MEMORY.md", false},
-		{"notes.md", false},
-		{"archive/old.md", false},
-		{"", false},
-	}
-	for _, tt := range tests {
-		if got := IsValidWikiPath(tt.path); got != tt.valid {
-			t.Errorf("IsValidWikiPath(%q) = %v, want %v", tt.path, got, tt.valid)
-		}
-	}
-}
-
 func TestEnsureFrontmatter(t *testing.T) {
 	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
 
