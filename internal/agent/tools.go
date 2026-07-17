@@ -3,6 +3,8 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/qiffang/engram9/internal/storage"
 )
@@ -122,6 +124,34 @@ func (te *ToolExecutor) searchWiki(input json.RawMessage) (string, error) {
 	return string(data), nil
 }
 
+// EnsureFrontmatter injects compiled_from and last_compiled frontmatter
+// comments if they are missing from the content.
+func EnsureFrontmatter(content string, sourceEvents []string, now time.Time) string {
+	hasCompiledFrom := strings.Contains(content, "<!-- compiled_from:")
+	hasLastCompiled := strings.Contains(content, "<!-- last_compiled:")
+
+	if hasCompiledFrom && hasLastCompiled {
+		return content
+	}
+
+	var lines []string
+	if !hasCompiledFrom {
+		src := "ingest"
+		if len(sourceEvents) > 0 {
+			src = strings.Join(sourceEvents, ", ")
+		}
+		lines = append(lines, fmt.Sprintf("<!-- compiled_from: %s -->", src))
+	}
+	if !hasLastCompiled {
+		lines = append(lines, fmt.Sprintf("<!-- last_compiled: %s -->", now.UTC().Format(time.RFC3339)))
+	}
+
+	if len(lines) == 0 {
+		return content
+	}
+	return strings.Join(lines, "\n") + "\n" + content
+}
+
 func (te *ToolExecutor) writeWikiPage(input json.RawMessage) (string, error) {
 	var params struct {
 		Path         string   `json:"path"`
@@ -132,6 +162,10 @@ func (te *ToolExecutor) writeWikiPage(input json.RawMessage) (string, error) {
 	if err := json.Unmarshal(input, &params); err != nil {
 		return "", fmt.Errorf("parse write_wiki_page input: %w", err)
 	}
+	if !IsValidWikiPath(params.Path) {
+		return "", fmt.Errorf("invalid wiki path %q: must start with semantic/, episodic/, procedural/, prospective/, or be index.md", params.Path)
+	}
+	params.Content = EnsureFrontmatter(params.Content, params.SourceEvents, time.Now())
 	if err := te.store.WriteWikiPageWithMeta(params.Path, params.Content, params.SourceEvents, params.TrustTier); err != nil {
 		return "", err
 	}

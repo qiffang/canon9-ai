@@ -85,7 +85,7 @@ func (v *WikiValidator) Validate(prodDir, stagingDir string, opts ...ValidateOpt
 		}
 
 		// Check valid taxonomy path.
-		if !isValidWikiPath(relPath) {
+		if !IsValidWikiPath(relPath) {
 			violations = append(violations, Violation{
 				Path:    relPath,
 				Message: "path does not conform to wiki taxonomy (semantic/, episodic/, procedural/, prospective/)",
@@ -160,8 +160,8 @@ func (v *WikiValidator) Validate(prodDir, stagingDir string, opts ...ValidateOpt
 	return violations, nil
 }
 
-// isValidWikiPath checks if a path conforms to the wiki taxonomy.
-func isValidWikiPath(relPath string) bool {
+// IsValidWikiPath checks if a path conforms to the wiki taxonomy.
+func IsValidWikiPath(relPath string) bool {
 	validPrefixes := []string{"semantic/", "episodic/", "procedural/", "prospective/"}
 	// Also allow index.md at root.
 	if relPath == "index.md" {

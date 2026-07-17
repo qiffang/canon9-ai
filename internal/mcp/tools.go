@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/qiffang/engram9/internal/agent"
 	"github.com/qiffang/engram9/internal/storage"
 )
 
@@ -211,6 +213,9 @@ func (s *Server) execAgentWriteWikiPage(args map[string]any) (string, error) {
 	if err := validatePath(path); err != nil {
 		return "", err
 	}
+	if !agent.IsValidWikiPath(path) {
+		return "", fmt.Errorf("invalid wiki path %q: must start with semantic/, episodic/, procedural/, prospective/, or be index.md", path)
+	}
 
 	var sourceEvents []string
 	if se, ok := args["source_events"].([]any); ok {
@@ -226,6 +231,7 @@ func (s *Server) execAgentWriteWikiPage(args map[string]any) (string, error) {
 		trustTier = int(tt)
 	}
 
+	content = agent.EnsureFrontmatter(content, sourceEvents, time.Now())
 	if err := s.store.WriteWikiPageWithMeta(path, content, sourceEvents, trustTier); err != nil {
 		return "", err
 	}

@@ -77,11 +77,11 @@ var ToolSearchWiki = Tool{
 
 var ToolWriteWikiPage = Tool{
 	Name:        "write_wiki_page",
-	Description: "Create or update a wiki page. Use to weave new information into existing pages, create new pages, fix errors, or add cross-references. Pass source_events and trust_tier to track provenance in sidecar metadata.",
+	Description: "Create or update a wiki page. Path must start with semantic/, episodic/, procedural/, prospective/, or be index.md. Frontmatter (compiled_from, last_compiled) is auto-injected if missing. Pass source_events and trust_tier to track provenance.",
 	InputSchema: mustJSON(map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path":          map[string]any{"type": "string", "description": "Relative path within wiki/ (e.g. semantic/projects/db9.md)"},
+			"path":          map[string]any{"type": "string", "description": "Relative path: must start with semantic/, episodic/, procedural/, prospective/, or be index.md (e.g. semantic/projects/db9.md)"},
 			"content":       map[string]any{"type": "string", "description": "Full markdown content of the page"},
 			"source_events": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Event IDs that contributed to this page (e.g. [\"evt_xxx\", \"evt_yyy\"])"},
 			"trust_tier":    map[string]any{"type": "integer", "enum": []int{1, 2, 3}, "description": "Highest trust level among sources: 1=user direct, 2=tool/inferred, 3=second-hand"},
