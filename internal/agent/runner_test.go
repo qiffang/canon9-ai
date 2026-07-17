@@ -292,7 +292,7 @@ func TestRunnerReadOnlyRepeatGuardResetsAfterSuccessfulWrite(t *testing.T) {
 	llm := &sequenceToolLLM{calls: []ContentBlock{
 		{Type: "tool_use", ID: "read_1", Name: "read_wiki_index", Input: json.RawMessage(`{}`)},
 		{Type: "tool_use", ID: "read_2", Name: "read_wiki_index", Input: json.RawMessage(`{}`)},
-		{Type: "tool_use", ID: "write_1", Name: "write_wiki_page", Input: json.RawMessage(`{"path":"notes.md","content":"progress"}`)},
+		{Type: "tool_use", ID: "write_1", Name: "write_wiki_page", Input: json.RawMessage(`{"path":"semantic/notes.md","content":"progress"}`)},
 		{Type: "tool_use", ID: "read_3", Name: "read_wiki_index", Input: json.RawMessage(`{}`)},
 		{Type: "tool_use", ID: "read_4", Name: "read_wiki_index", Input: json.RawMessage(`{}`)},
 	}}

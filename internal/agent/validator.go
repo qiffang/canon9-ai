@@ -98,8 +98,9 @@ func (v *WikiValidator) Validate(prodDir, stagingDir string, opts ...ValidateOpt
 			return err
 		}
 
-		// Check frontmatter.
-		if !hasFrontmatter(string(stagingContent)) {
+		// Check frontmatter on content pages. RebuildIndex owns the root and
+		// category indexes and intentionally generates them without frontmatter.
+		if !isStructuralWikiIndex(relPath) && !hasFrontmatter(string(stagingContent)) {
 			violations = append(violations, Violation{
 				Path:    relPath,
 				Message: "missing required frontmatter (compiled_from, last_compiled)",
@@ -173,6 +174,19 @@ func IsValidWikiPath(relPath string) bool {
 		}
 	}
 	return false
+}
+
+func isStructuralWikiIndex(relPath string) bool {
+	switch filepath.ToSlash(relPath) {
+	case "index.md",
+		"semantic/index.md",
+		"episodic/index.md",
+		"procedural/index.md",
+		"prospective/index.md":
+		return true
+	default:
+		return false
+	}
 }
 
 // hasFrontmatter checks if wiki content has required frontmatter comments.

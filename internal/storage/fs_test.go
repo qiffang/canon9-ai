@@ -222,6 +222,22 @@ func TestRebuildIndexGeneratesCategorySubIndexes(t *testing.T) {
 	if !strings.Contains(string(data3), "No pages yet") {
 		t.Error("empty category index should say 'No pages yet'")
 	}
+
+	for _, relPath := range []string{
+		"index.md",
+		"semantic/index.md",
+		"episodic/index.md",
+		"procedural/index.md",
+		"prospective/index.md",
+	} {
+		content, err := os.ReadFile(filepath.Join(fs.wikiDir(), relPath))
+		if err != nil {
+			t.Fatalf("read generated structural index %s: %v", relPath, err)
+		}
+		if strings.Contains(string(content), "compiled_from:") || strings.Contains(string(content), "last_compiled:") {
+			t.Errorf("generated structural index %s must not contain page frontmatter", relPath)
+		}
+	}
 }
 
 func TestGetMemoryStats(t *testing.T) {
