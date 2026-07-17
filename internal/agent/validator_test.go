@@ -103,11 +103,35 @@ func TestWikiValidatorRejectsInvalidTaxonomy(t *testing.T) {
 	}
 }
 
-func TestWikiValidatorAllowsIndexMD(t *testing.T) {
+func TestWikiValidatorAllowsStructuralIndexesWithoutFrontmatter(t *testing.T) {
 	prod := t.TempDir()
 	staging := t.TempDir()
 
-	writeTestFile(t, staging, "wiki/index.md", validFrontmatter)
+	for _, path := range []string{
+		"index.md",
+		"semantic/index.md",
+		"episodic/index.md",
+		"procedural/index.md",
+		"prospective/index.md",
+	} {
+		writeTestFile(t, staging, filepath.Join("wiki", path), "# Generated Index\n")
+	}
+
+	v := NewWikiValidator(DefaultACPMaxDiffBytes)
+	violations, err := v.Validate(prod, staging)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(violations) != 0 {
+		t.Fatalf("structural indexes should be allowed without frontmatter, got %v", violations)
+	}
+}
+
+func TestWikiValidatorRejectsNestedIndexWithoutFrontmatter(t *testing.T) {
+	prod := t.TempDir()
+	staging := t.TempDir()
+
+	writeTestFile(t, staging, "wiki/semantic/projects/index.md", "# Projects\n")
 
 	v := NewWikiValidator(DefaultACPMaxDiffBytes)
 	violations, err := v.Validate(prod, staging)
@@ -115,10 +139,11 @@ func TestWikiValidatorAllowsIndexMD(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, vi := range violations {
-		if vi.Path == "index.md" && contains(vi.Message, "taxonomy") {
-			t.Fatalf("index.md should be allowed, got violation: %v", vi)
+		if vi.Path == "semantic/projects/index.md" && contains(vi.Message, "frontmatter") {
+			return
 		}
 	}
+	t.Fatalf("expected frontmatter violation for nested index page, got %v", violations)
 }
 
 func TestWikiValidatorRejectsDiffBudgetExceeded(t *testing.T) {
@@ -247,8 +272,8 @@ func TestIsValidWikiPath(t *testing.T) {
 		{"semantic/nested/f.md", true},
 	}
 	for _, tt := range tests {
-		if got := isValidWikiPath(tt.path); got != tt.want {
-			t.Errorf("isValidWikiPath(%q)=%v, want %v", tt.path, got, tt.want)
+		if got := IsValidWikiPath(tt.path); got != tt.want {
+			t.Errorf("IsValidWikiPath(%q)=%v, want %v", tt.path, got, tt.want)
 		}
 	}
 }
