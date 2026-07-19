@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +16,8 @@ import (
 	"time"
 
 	"github.com/qiffang/engram9/internal/agent"
+	"github.com/qiffang/engram9/internal/storage"
+	"github.com/stretchr/testify/require"
 )
 
 // mockLLM returns a canned response for testing without real API calls.
@@ -46,6 +51,21 @@ func newTestHandler(t *testing.T) *Handler {
 		t.Fatal(err)
 	}
 	return h
+}
+
+func newACPTestHandler(t *testing.T, dataDir string) *Handler {
+	t.Helper()
+	scriptPath := filepath.Join(t.TempDir(), "acpmux")
+	require.NoError(t, os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	handler, err := NewWithOptions(dataDir, &mockLLM{response: "ok"}, Options{
+		WikiBackend:  "acp",
+		QueryBackend: "llm",
+		ACPConfig: &agent.ACPBackendConfig{
+			Provider: "claude", AcpmuxCommand: scriptPath, TurnTimeout: time.Second,
+		},
+	})
+	require.NoError(t, err)
+	return handler
 }
 
 func TestIngestTimeoutFromEnv(t *testing.T) {
@@ -122,6 +142,287 @@ func TestRememberEndpoint(t *testing.T) {
 	if !strings.HasPrefix(result.EventID, "evt_") {
 		t.Errorf("event_id=%q, want evt_ prefix", result.EventID)
 	}
+}
+
+func TestRememberPersistsFullContextJSON(t *testing.T) {
+	h := newTestHandler(t)
+	request := httptest.NewRequest(http.MethodPost, "/remember", strings.NewReader(`{
+        "text":"full context",
+        "context":{"actor":"alice","custom_key":"custom_value"}
+    }`))
+	response := httptest.NewRecorder()
+	h.Routes().ServeHTTP(response, request)
+	require.Equal(t, http.StatusOK, response.Code)
+	h.Wait()
+
+	page, err := h.store.ReadEventsSince(0)
+	require.NoError(t, err)
+	require.Len(t, page.Events, 1)
+	require.JSONEq(t, `{"actor":"alice","custom_key":"custom_value"}`, page.Events[0].ContextJSON)
+}
+
+func TestRememberOmitsContextJSONForEmptyContext(t *testing.T) {
+	h := newTestHandler(t)
+	request := httptest.NewRequest(http.MethodPost, "/remember", strings.NewReader(`{"text":"no context","context":{}}`))
+	response := httptest.NewRecorder()
+	h.Routes().ServeHTTP(response, request)
+	require.Equal(t, http.StatusOK, response.Code)
+	h.Wait()
+
+	page, err := h.store.ReadEventsSince(0)
+	require.NoError(t, err)
+	require.Empty(t, page.Events[0].ContextJSON)
+}
+
+func TestACPRememberQueuesWithoutPerEventGoroutine(t *testing.T) {
+	t.Setenv("BATCH_INGEST_EPOCH", "")
+	h := newACPTestHandler(t, t.TempDir())
+	request := httptest.NewRequest(http.MethodPost, "/remember", strings.NewReader(`{"text":"batch me","context":{"custom":"value"}}`))
+	response := httptest.NewRecorder()
+	h.Routes().ServeHTTP(response, request)
+	require.Equal(t, http.StatusOK, response.Code)
+	require.Equal(t, int64(0), h.pendingIntegrations.Load())
+
+	statusResponse := httptest.NewRecorder()
+	h.Routes().ServeHTTP(statusResponse, httptest.NewRequest(http.MethodGet, "/status", nil))
+	require.Equal(t, http.StatusOK, statusResponse.Code)
+	var status StatusResponse
+	require.NoError(t, json.NewDecoder(statusResponse.Body).Decode(&status))
+	require.NotNil(t, status.BatchIngest)
+	require.Equal(t, 1, status.BatchIngest.Pending)
+	require.Equal(t, int64(1), status.PendingIntegrations)
+	require.Equal(t, "in_progress", status.BatchIngest.Health)
+}
+
+func TestACPRememberNilAndOmittedContextRemainNilInBatchPrompt(t *testing.T) {
+	t.Setenv("BATCH_INGEST_EPOCH", "")
+	h := newACPTestHandler(t, t.TempDir())
+	for _, body := range []string{
+		`{"text":"null context","context":null}`,
+		`{"text":"omitted context"}`,
+	} {
+		response := httptest.NewRecorder()
+		h.Routes().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/remember", strings.NewReader(body)))
+		require.Equal(t, http.StatusOK, response.Code)
+	}
+	page, err := h.store.ReadEventsSince(0)
+	require.NoError(t, err)
+	require.Len(t, page.Events, 2)
+	for _, event := range page.Events {
+		pending := agent.NormalizeToPendingEvent(event)
+		require.Nil(t, pending.Context)
+		require.Contains(t, agent.BuildBatchPrompt(agent.Batch{Events: []agent.PendingEvent{pending}}), "Context: none")
+	}
+}
+
+func TestACPRememberAfterStartAppearsInNextBatchPrompt(t *testing.T) {
+	t.Setenv("BATCH_INGEST_EPOCH", "")
+	dataDir := t.TempDir()
+	capturePath := filepath.Join(t.TempDir(), "prompt.json")
+	scriptPath := filepath.Join(t.TempDir(), "acpmux")
+	script := fmt.Sprintf(`#!/bin/sh
+set -eu
+IFS= read -r initialize
+printf '%%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}'
+IFS= read -r initialized
+IFS= read -r session
+printf '%%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"session"}}'
+IFS= read -r prompt
+printf '%%s\n' "$prompt" > %q
+printf '%%s\n' '{"jsonrpc":"2.0","id":3,"result":{"text":"processed"}}'
+`, capturePath)
+	require.NoError(t, os.WriteFile(scriptPath, []byte(script), 0o755))
+
+	handler, err := NewWithOptions(dataDir, &mockLLM{response: "ok"}, Options{
+		WikiBackend:  "acp",
+		QueryBackend: "llm",
+		ACPConfig: &agent.ACPBackendConfig{
+			Provider: "claude", AcpmuxCommand: scriptPath, TurnTimeout: time.Second,
+		},
+		CoordinatorConfig: agent.CoordinatorConfig{FlushThreshold: 1, FlushInterval: time.Hour},
+	})
+	require.NoError(t, err)
+	require.NoError(t, handler.StartBatchCoordinator(time.Second))
+	defer handler.StopBatchCoordinator(context.Background())
+
+	response := httptest.NewRecorder()
+	handler.Routes().ServeHTTP(response, httptest.NewRequest(
+		http.MethodPost,
+		"/remember",
+		strings.NewReader(`{"text":"deploy the release","context":{"topic":"deploy","env":"prod"}}`),
+	))
+	require.Equal(t, http.StatusOK, response.Code)
+	rawEvents, err := handler.store.ReadEventsSince(0)
+	require.NoError(t, err)
+	require.Len(t, rawEvents.Events, 1)
+
+	require.Eventually(t, func() bool {
+		_, statErr := os.Stat(capturePath)
+		return statErr == nil
+	}, 5*time.Second, 10*time.Millisecond)
+	captured, err := os.ReadFile(capturePath)
+	require.NoError(t, err)
+	var request struct {
+		Params struct {
+			Prompt string `json:"prompt"`
+		} `json:"params"`
+	}
+	require.NoError(t, json.Unmarshal(captured, &request))
+	require.Contains(t, request.Params.Prompt, "deploy the release")
+	require.Contains(t, request.Params.Prompt, "Context: env=prod; topic=deploy")
+	require.Contains(t, request.Params.Prompt, "Timestamp: "+rawEvents.Events[0].Timestamp)
+}
+
+func TestACPRememberReturns503WithoutDurableAppendWhenBootstrapRefused(t *testing.T) {
+	t.Setenv("BATCH_INGEST_EPOCH", "")
+	dataDir := t.TempDir()
+	filesystem, err := storage.NewFS(dataDir)
+	require.NoError(t, err)
+	_, err = filesystem.AppendEvent(storage.Event{ID: "existing", Content: "backlog"})
+	require.NoError(t, err)
+	h := newACPTestHandler(t, dataDir)
+	require.Nil(t, h.coordinator)
+
+	response := httptest.NewRecorder()
+	h.Routes().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/remember", strings.NewReader(`{"text":"must not append"}`)))
+	require.Equal(t, http.StatusServiceUnavailable, response.Code)
+	page, err := h.store.ReadEventsSince(0)
+	require.NoError(t, err)
+	require.Len(t, page.Events, 1)
+
+	statusResponse := httptest.NewRecorder()
+	h.Routes().ServeHTTP(statusResponse, httptest.NewRequest(http.MethodGet, "/status", nil))
+	require.Equal(t, http.StatusOK, statusResponse.Code)
+	var status StatusResponse
+	require.NoError(t, json.NewDecoder(statusResponse.Body).Decode(&status))
+	require.Nil(t, status.BatchIngest)
+}
+
+func TestActiveRememberCompletesAfterHTTPShutdownTimeout(t *testing.T) {
+	t.Setenv("BATCH_INGEST_EPOCH", "")
+	h := newACPTestHandler(t, t.TempDir())
+	requestStarted := make(chan struct{})
+	var startOnce sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		startOnce.Do(func() { close(requestStarted) })
+		h.Routes().ServeHTTP(w, request)
+	}))
+	defer server.Close()
+
+	reader, writer := io.Pipe()
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/remember", reader)
+	require.NoError(t, err)
+	request.Header.Set("Content-Type", "application/json")
+	responseDone := make(chan *http.Response, 1)
+	errorDone := make(chan error, 1)
+	go func() {
+		response, requestErr := http.DefaultClient.Do(request)
+		if requestErr != nil {
+			errorDone <- requestErr
+			return
+		}
+		responseDone <- response
+	}()
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("request did not start")
+	}
+
+	shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, server.Config.Shutdown(shutdownContext), context.DeadlineExceeded)
+	_, err = io.WriteString(writer, `{"text":"durable during shutdown"}`)
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	select {
+	case response := <-responseDone:
+		require.Equal(t, http.StatusOK, response.StatusCode)
+		require.NoError(t, response.Body.Close())
+	case requestErr := <-errorDone:
+		t.Fatal(requestErr)
+	case <-time.After(time.Second):
+		t.Fatal("request did not finish")
+	}
+	page, err := h.store.ReadEventsSince(0)
+	require.NoError(t, err)
+	require.Len(t, page.Events, 1)
+	require.Equal(t, 1, h.coordinator.Status().Pending)
+}
+
+func TestAdminEventRoutes(t *testing.T) {
+	t.Setenv("ENGRAM9_ADMIN_TOKEN", "secret")
+	t.Setenv("BATCH_INGEST_EPOCH", "")
+	dataDir := t.TempDir()
+	filesystem, err := storage.NewFS(dataDir)
+	require.NoError(t, err)
+	_, err = filesystem.AppendEvent(storage.Event{ID: "unknown", Content: "uncertain"})
+	require.NoError(t, err)
+	_, err = filesystem.AppendEvent(storage.Event{ID: "failed", Content: "retry me"})
+	require.NoError(t, err)
+	statusLog := strings.Join([]string{
+		`{"type":"bootstrap","epoch":"0001-01-01T00:00:00Z"}`,
+		`{"event_id":"unknown","status":"unknown"}`,
+		`{"event_id":"failed","status":"failed"}`,
+	}, "\n") + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dataDir, "wiki_integration_status.jsonl"), []byte(statusLog), 0o600))
+	h := newACPTestHandler(t, dataDir)
+
+	unauthorized := httptest.NewRecorder()
+	h.Routes().ServeHTTP(unauthorized, httptest.NewRequest(http.MethodPost, "/admin/events/unknown/confirm", nil))
+	require.Equal(t, http.StatusForbidden, unauthorized.Code)
+
+	confirmRequest := httptest.NewRequest(http.MethodPost, "/admin/events/unknown/confirm", nil)
+	confirmRequest.Header.Set("X-Admin-Token", "secret")
+	confirmResponse := httptest.NewRecorder()
+	h.Routes().ServeHTTP(confirmResponse, confirmRequest)
+	require.Equal(t, http.StatusOK, confirmResponse.Code)
+	var confirmResult agent.AdminResult
+	require.NoError(t, json.NewDecoder(confirmResponse.Body).Decode(&confirmResult))
+	require.Equal(t, agent.AdminResult{EventID: "unknown", OldStatus: "unknown", NewStatus: "integrated"}, confirmResult)
+
+	conflictRequest := httptest.NewRequest(http.MethodPost, "/admin/events/unknown/confirm", nil)
+	conflictRequest.Header.Set("X-Admin-Token", "secret")
+	conflictResponse := httptest.NewRecorder()
+	h.Routes().ServeHTTP(conflictResponse, conflictRequest)
+	require.Equal(t, http.StatusConflict, conflictResponse.Code)
+	require.Contains(t, conflictResponse.Body.String(), `"current_status":"integrated"`)
+
+	resetRequest := httptest.NewRequest(http.MethodPost, "/admin/events/failed/reset", nil)
+	resetRequest.Header.Set("X-Admin-Token", "secret")
+	resetResponse := httptest.NewRecorder()
+	h.Routes().ServeHTTP(resetResponse, resetRequest)
+	require.Equal(t, http.StatusOK, resetResponse.Code)
+	require.Contains(t, resetResponse.Body.String(), `"new_status":"pending"`)
+
+	missingRequest := httptest.NewRequest(http.MethodPost, "/admin/events/missing/reset", nil)
+	missingRequest.Header.Set("X-Admin-Token", "secret")
+	missingResponse := httptest.NewRecorder()
+	h.Routes().ServeHTTP(missingResponse, missingRequest)
+	require.Equal(t, http.StatusNotFound, missingResponse.Code)
+}
+
+func TestAdminRoutesFailClosedWhenTokenUnset(t *testing.T) {
+	t.Setenv("ENGRAM9_ADMIN_TOKEN", "")
+	h := newTestHandler(t)
+	request := httptest.NewRequest(http.MethodPost, "/admin/events/event/reset", nil)
+	response := httptest.NewRecorder()
+	h.Routes().ServeHTTP(response, request)
+	require.Equal(t, http.StatusForbidden, response.Code)
+}
+
+func TestAdminTransitionMapsStoreIOErrorTo500(t *testing.T) {
+	h := newTestHandler(t)
+	h.adminToken = "secret"
+	h.coordinator = agent.NewBatchCoordinator(nil, nil, nil, nil, "", agent.CoordinatorConfig{})
+	request := httptest.NewRequest(http.MethodPost, "/admin/events/event/reset", nil)
+	request.Header.Set("X-Admin-Token", "secret")
+	response := httptest.NewRecorder()
+	h.handleAdminTransition(response, request, func(string) (agent.AdminResult, error) {
+		return agent.AdminResult{}, fmt.Errorf("raw event source: disk failed")
+	})
+	require.Equal(t, http.StatusInternalServerError, response.Code)
+	require.JSONEq(t, `{"error":"internal error"}`, response.Body.String())
 }
 
 func TestRememberEmptyText(t *testing.T) {
@@ -605,11 +906,9 @@ func TestNewWithOptionsRejectsACPWithoutConfig(t *testing.T) {
 	}
 }
 
-// TestWikiMuSerializesACPIngestCompileRecall verifies that when wikiBackendName
-// is "acp", concurrent ingest, compile, and recall operations are serialized by
-// wikiMu — no two wiki-mutating operations run at the same time.
-// This is a regression test for the cross-backend lost-update race.
-func TestWikiMuSerializesACPIngestCompileRecall(t *testing.T) {
+// TestWikiMuSerializesCompileRecallInACPMode verifies that compile and recall
+// remain serialized while batch ACP ingest owns wikiMu through the coordinator.
+func TestWikiMuSerializesCompileRecallInACPMode(t *testing.T) {
 	llm := &activeCountingLLM{delay: 20 * time.Millisecond}
 	h, err := NewWithOptions(t.TempDir(), llm, Options{
 		IngestTimeout:             2 * time.Second,
@@ -629,22 +928,6 @@ func TestWikiMuSerializesACPIngestCompileRecall(t *testing.T) {
 	defer h.Wait()
 
 	var wg sync.WaitGroup
-
-	// Fire concurrent ingest requests.
-	for i := 0; i < 3; i++ {
-		wg.Add(1)
-		go func(n int) {
-			defer wg.Done()
-			resp, err := http.Post(srv.URL+"/remember",
-				"application/json",
-				strings.NewReader(fmt.Sprintf(`{"text":"event %d"}`, n)))
-			if err != nil {
-				t.Errorf("remember %d: %v", n, err)
-				return
-			}
-			_ = resp.Body.Close()
-		}(i)
-	}
 
 	// Fire concurrent compile requests.
 	for i := 0; i < 2; i++ {
@@ -678,7 +961,7 @@ func TestWikiMuSerializesACPIngestCompileRecall(t *testing.T) {
 		}()
 	}
 
-	// Wait for synchronous requests to finish, then wait for async ingests.
+	// Wait for synchronous requests to finish.
 	wg.Wait()
 	h.Wait()
 

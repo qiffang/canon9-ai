@@ -131,6 +131,12 @@ ANTHROPIC_API_KEY=sk-xxx ./engram9 -addr :9090 -data ./data
 LLM_PROVIDER=openai OPENAI_API_KEY=xxx OPENAI_BASE_URL=https://your-api/v1 \
   ./engram9 -addr :9090 -data ./data -model your-model
 
+# Run ACP batch ingest with Claude through acpmux
+WIKI_BACKEND=acp ACP_PROVIDER=claude \
+  BATCH_INGEST_EPOCH=2026-07-19T00:00:00Z \
+  ENGRAM9_ADMIN_TOKEN=replace-with-a-secret \
+  ./engram9 -addr :9090 -data ./data
+
 # Validate an OKF bundle
 ./engram9 validate examples/repo-memory
 ./engram9 validate --strict examples/repo-memory
@@ -161,6 +167,33 @@ curl -X POST /compile -d '{}'
 # System status
 curl GET /status
 ```
+
+### ACP batch ingest
+
+When `WIKI_BACKEND=acp`, `/remember` appends the raw event and queues it for the
+single batch coordinator. The coordinator groups up to 20 events, validates and
+merges each batch atomically, persists per-event integration status, and exposes
+its queue and health under `/status.batch_ingest`.
+
+The first ACP startup with an existing raw event log requires
+`BATCH_INGEST_EPOCH` in RFC3339 form. Events older than that one-time boundary
+are marked integrated; equal or newer events remain pending. Use
+`0001-01-01T00:00:00Z` to replay all history. If the raw log is empty, omitting
+the variable initializes the status log at the current time.
+
+Manual triage endpoints require `X-Admin-Token` matching
+`ENGRAM9_ADMIN_TOKEN`:
+
+```bash
+curl -X POST -H "X-Admin-Token: $ENGRAM9_ADMIN_TOKEN" \
+  /admin/events/evt_123/reset
+curl -X POST -H "X-Admin-Token: $ENGRAM9_ADMIN_TOKEN" \
+  /admin/events/evt_123/confirm
+```
+
+Reset or confirm only events absent from `current_batch.event_ids`. An admin
+write racing an active batch uses append-only last-write-wins ordering, so the
+batch result may supersede the manual transition.
 
 ## Design
 

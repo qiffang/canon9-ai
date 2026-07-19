@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/qiffang/engram9/internal/storage"
@@ -37,6 +39,52 @@ type ACPBackend struct {
 	cfg       ACPBackendConfig
 	dataDir   string
 	validator *WikiValidator
+}
+
+type TurnResult struct {
+	Summary    string
+	Violations []Violation
+	Merged     bool
+}
+
+type BatchResult struct {
+	BatchID      string        `json:"batch_id"`
+	Status       string        `json:"status"`
+	EventResults []EventResult `json:"event_results,omitempty"`
+	Summary      string        `json:"summary,omitempty"`
+	Violations   []Violation   `json:"violations,omitempty"`
+	IndexStale   bool          `json:"index_stale"`
+	Error        error         `json:"-"`
+	DurationMs   int64         `json:"duration_ms"`
+}
+
+func (result BatchResult) IsShutdownCancel() bool {
+	return result.Error != nil && errors.Is(result.Error, context.Canceled)
+}
+
+func (result BatchResult) errorClass() string {
+	switch {
+	case len(result.Violations) > 0:
+		return "validation"
+	case errors.Is(result.Error, context.DeadlineExceeded):
+		return "timeout"
+	default:
+		return "crash"
+	}
+}
+
+func (result BatchResult) failureReason() string {
+	if len(result.Violations) > 0 {
+		messages := make([]string, len(result.Violations))
+		for index, violation := range result.Violations {
+			messages[index] = violation.String()
+		}
+		return "validation failed: " + strings.Join(messages, "; ")
+	}
+	if result.Error != nil {
+		return result.Error.Error()
+	}
+	return "batch failed"
 }
 
 // NewACPBackend creates an ACPBackend. It validates the config at construction time.
@@ -96,6 +144,65 @@ func (b *ACPBackend) RunIngest(ctx context.Context, eventID string, text string,
 	return IngestResult{Summary: summary}, nil
 }
 
+func (b *ACPBackend) TurnTimeout() time.Duration {
+	return b.cfg.TurnTimeout
+}
+
+func (b *ACPBackend) RunBatchIngest(ctx context.Context, batch Batch, wikiMu *sync.Mutex, rebuildIndex func() error) (BatchResult, error) {
+	startedAt := time.Now()
+	result := BatchResult{BatchID: batch.ID, Status: "failed"}
+	finish := func() BatchResult {
+		result.DurationMs = time.Since(startedAt).Milliseconds()
+		return result
+	}
+	if wikiMu == nil {
+		return finish(), fmt.Errorf("wiki mutex is required")
+	}
+	if rebuildIndex == nil {
+		return finish(), fmt.Errorf("wiki index rebuild function is required")
+	}
+
+	locked := make(chan struct{})
+	go func() {
+		wikiMu.Lock()
+		close(locked)
+	}()
+	select {
+	case <-locked:
+	case <-ctx.Done():
+		go func() {
+			<-locked
+			wikiMu.Unlock()
+		}()
+		result.Error = ctx.Err()
+		return finish(), nil
+	}
+
+	turnResult, err := b.runACPTurnFull(ctx, BuildBatchPrompt(batch), ValidateOptions{AllowDelete: false})
+	if err != nil {
+		wikiMu.Unlock()
+		if errors.Is(ctx.Err(), context.Canceled) {
+			result.Error = context.Canceled
+		} else {
+			result.Error = err
+		}
+		return finish(), nil
+	}
+	result.Summary = turnResult.Summary
+	if len(turnResult.Violations) > 0 {
+		wikiMu.Unlock()
+		result.Violations = turnResult.Violations
+		return finish(), nil
+	}
+
+	indexErr := rebuildIndex()
+	wikiMu.Unlock()
+	result.Status = "success"
+	result.EventResults = parseEventResults(batch, turnResult.Summary)
+	result.IndexStale = indexErr != nil
+	return finish(), nil
+}
+
 func (b *ACPBackend) RunCompile(_ context.Context, _ uint64) (CompileResult, error) {
 	// ACP compile is not yet supported: MCP agent mode only exposes wiki tools
 	// (read_wiki_index, read_wiki_page, write_wiki_page, search_wiki) but compile
@@ -120,19 +227,33 @@ func (b *ACPBackend) Close() error {
 // 5. Validate staging wiki
 // 6. Merge staging -> production
 func (b *ACPBackend) runACPTurn(ctx context.Context, prompt string, valOpts ValidateOptions) (string, error) {
-	// Apply turn timeout.
 	ctx, cancel := context.WithTimeout(ctx, b.cfg.TurnTimeout)
 	defer cancel()
+	result, err := b.runACPTurnFull(ctx, prompt, valOpts)
+	if err != nil {
+		return "", err
+	}
+	if len(result.Violations) > 0 {
+		messages := make([]string, len(result.Violations))
+		for index, violation := range result.Violations {
+			messages[index] = violation.String()
+		}
+		return "", fmt.Errorf("validation failed: %s", strings.Join(messages, "; "))
+	}
+	return result.Summary, nil
+}
+
+func (b *ACPBackend) runACPTurnFull(ctx context.Context, prompt string, valOpts ValidateOptions) (TurnResult, error) {
 
 	// 1. Create staging directory and copy data.
 	stagingDir, err := os.MkdirTemp("", "engram9-acp-staging-*")
 	if err != nil {
-		return "", fmt.Errorf("create staging dir: %w", err)
+		return TurnResult{}, fmt.Errorf("create staging dir: %w", err)
 	}
 	defer os.RemoveAll(stagingDir)
 
 	if err := copyDir(b.dataDir, stagingDir); err != nil {
-		return "", fmt.Errorf("copy to staging: %w", err)
+		return TurnResult{}, fmt.Errorf("copy to staging: %w", err)
 	}
 
 	// 2. Spawn acpmux process.
@@ -144,15 +265,15 @@ func (b *ACPBackend) runACPTurn(ctx context.Context, prompt string, valOpts Vali
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return "", fmt.Errorf("stdin pipe: %w", err)
+		return TurnResult{}, fmt.Errorf("stdin pipe: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return "", fmt.Errorf("stdout pipe: %w", err)
+		return TurnResult{}, fmt.Errorf("stdout pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("start acpmux: %w", err)
+		return TurnResult{}, fmt.Errorf("start acpmux: %w", err)
 	}
 
 	// Ensure process is killed on exit.
@@ -175,14 +296,14 @@ func (b *ACPBackend) runACPTurn(ctx context.Context, prompt string, valOpts Vali
 		}),
 	}
 	if err := sendACPRequest(stdin, initReq); err != nil {
-		return "", fmt.Errorf("send initialize: %w", err)
+		return TurnResult{}, fmt.Errorf("send initialize: %w", err)
 	}
 	initResp, err := readACPResponseForID(scanner, "1")
 	if err != nil {
-		return "", fmt.Errorf("initialize response: %w", err)
+		return TurnResult{}, fmt.Errorf("initialize response: %w", err)
 	}
 	if initResp.Error != nil {
-		return "", fmt.Errorf("initialize failed: ACP error %d: %s", initResp.Error.Code, initResp.Error.Message)
+		return TurnResult{}, fmt.Errorf("initialize failed: ACP error %d: %s", initResp.Error.Code, initResp.Error.Message)
 	}
 
 	// Send initialized notification.
@@ -191,7 +312,7 @@ func (b *ACPBackend) runACPTurn(ctx context.Context, prompt string, valOpts Vali
 		Method:  "notifications/initialized",
 	}
 	if err := sendACPRequest(stdin, initNotif); err != nil {
-		return "", fmt.Errorf("send initialized notification: %w", err)
+		return TurnResult{}, fmt.Errorf("send initialized notification: %w", err)
 	}
 
 	// 4. Send session/new with MCP config.
@@ -199,14 +320,14 @@ func (b *ACPBackend) runACPTurn(ctx context.Context, prompt string, valOpts Vali
 	// NOT nested under a "transport" key.
 	sessionReq := newACPSessionRequest(stagingDir)
 	if err := sendACPRequest(stdin, sessionReq); err != nil {
-		return "", fmt.Errorf("send session/new: %w", err)
+		return TurnResult{}, fmt.Errorf("send session/new: %w", err)
 	}
 	sessionResp, err := readACPResponseForID(scanner, "2")
 	if err != nil {
-		return "", fmt.Errorf("session/new response: %w", err)
+		return TurnResult{}, fmt.Errorf("session/new response: %w", err)
 	}
 	if sessionResp.Error != nil {
-		return "", fmt.Errorf("session/new failed: ACP error %d: %s", sessionResp.Error.Code, sessionResp.Error.Message)
+		return TurnResult{}, fmt.Errorf("session/new failed: ACP error %d: %s", sessionResp.Error.Code, sessionResp.Error.Message)
 	}
 
 	// Extract session ID.
@@ -228,11 +349,12 @@ func (b *ACPBackend) runACPTurn(ctx context.Context, prompt string, valOpts Vali
 		}),
 	}
 	if err := sendACPRequest(stdin, promptReq); err != nil {
-		return "", fmt.Errorf("send session/prompt: %w", err)
+		return TurnResult{}, fmt.Errorf("send session/prompt: %w", err)
 	}
 
 	// 6. Stream events until completion.
 	var summary string
+	promptCompleted := false
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -246,11 +368,12 @@ func (b *ACPBackend) runACPTurn(ctx context.Context, prompt string, valOpts Vali
 
 		// Check for errors.
 		if resp.Error != nil {
-			return "", fmt.Errorf("ACP error %d: %s", resp.Error.Code, resp.Error.Message)
+			return TurnResult{Summary: summary}, fmt.Errorf("ACP error %d: %s", resp.Error.Code, resp.Error.Message)
 		}
 
 		// If this is a response to our prompt request (id=3), we're done.
 		if string(resp.ID) == "3" {
+			promptCompleted = true
 			if resp.Result != nil {
 				var promptResult struct {
 					Text string `json:"text"`
@@ -267,28 +390,27 @@ func (b *ACPBackend) runACPTurn(ctx context.Context, prompt string, valOpts Vali
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return "", fmt.Errorf("read acp output: %w", err)
+		return TurnResult{Summary: summary}, fmt.Errorf("read acp output: %w", err)
+	}
+	if !promptCompleted {
+		return TurnResult{Summary: summary}, fmt.Errorf("read acp output: prompt response missing: %w", io.EOF)
 	}
 
 	// 7. Validate staging wiki.
 	violations, err := b.validator.Validate(b.dataDir, stagingDir, valOpts)
 	if err != nil {
-		return "", fmt.Errorf("validate staging: %w", err)
+		return TurnResult{Summary: summary}, fmt.Errorf("validate staging: %w", err)
 	}
 	if len(violations) > 0 {
-		var msgs []string
-		for _, v := range violations {
-			msgs = append(msgs, v.String())
-		}
-		return "", fmt.Errorf("validation failed: %s", strings.Join(msgs, "; "))
+		return TurnResult{Summary: summary, Violations: violations}, nil
 	}
 
 	// 8. Merge staging wiki -> production.
 	if err := mergeWiki(stagingDir, b.dataDir); err != nil {
-		return "", fmt.Errorf("merge staging: %w", err)
+		return TurnResult{Summary: summary}, fmt.Errorf("merge staging: %w", err)
 	}
 
-	return summary, nil
+	return TurnResult{Summary: summary, Merged: true}, nil
 }
 
 // --- ACP JSON-RPC types ---

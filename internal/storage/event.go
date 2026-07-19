@@ -17,6 +17,7 @@ type Event struct {
 	SessionID     string `json:"session_id,omitempty"`
 	ActiveProject string `json:"active_project,omitempty"`
 	ActiveTask    string `json:"active_task,omitempty"`
+	ContextJSON   string `json:"context_json,omitempty"`
 	Durability    string `json:"durability"`
 	Actionability string `json:"actionability"`
 	SourceType    string `json:"source_type"`
