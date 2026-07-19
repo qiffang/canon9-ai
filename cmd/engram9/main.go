@@ -7,7 +7,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/qiffang/engram9/internal/agent"
@@ -167,8 +169,12 @@ func runServe(args []string) {
 		log.Fatalf("init: %v", err)
 	}
 
+	if err := handler.StartBatchCoordinator(60 * time.Second); err != nil {
+		log.Fatalf("batch coordinator start: %v", err)
+	}
+	compileContext, compileCancel := context.WithCancel(context.Background())
 	if *compileInterval > 0 {
-		handler.StartAutoCompile(context.Background(), *compileInterval)
+		handler.StartAutoCompile(compileContext, *compileInterval)
 	}
 
 	log.Printf("engram9 listening on %s (data: %s)", *addr, *dataDir)
@@ -184,8 +190,38 @@ func runServe(args []string) {
 		log.Printf("engram9 llm: provider=%s model=%s retry_attempts=%d retry_backoff=%s call_timeout=%s",
 			llmProvider, llmModel, retryAttempts, *llmRetryBackoff, *llmCallTimeout)
 	}
-	if err := http.ListenAndServe(*addr, handler.Routes()); err != nil {
-		log.Fatalf("serve: %v", err)
+	server := &http.Server{Addr: *addr, Handler: handler.Routes()}
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("serve: %v", err)
+		}
+	}()
+
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	<-signals
+	signal.Stop(signals)
+
+	httpContext, cancelHTTP := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := server.Shutdown(httpContext); err != nil {
+		log.Printf("http drain incomplete: %v — proceeding with shutdown", err)
+	}
+	cancelHTTP()
+
+	compileCancel()
+	coordinatorContext, cancelCoordinator := context.WithTimeout(context.Background(), 45*time.Second)
+	handler.StopBatchCoordinator(coordinatorContext)
+	cancelCoordinator()
+
+	waitDone := make(chan struct{})
+	go func() {
+		handler.Wait()
+		close(waitDone)
+	}()
+	select {
+	case <-waitDone:
+	case <-time.After(5 * time.Second):
+		log.Printf("handler.Wait() timed out — exiting with in-flight work")
 	}
 }
 

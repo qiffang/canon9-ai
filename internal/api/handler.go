@@ -2,11 +2,14 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -22,6 +25,7 @@ type Handler struct {
 	wikiBackend    agent.AgentBackend // ingest
 	compileBackend agent.AgentBackend // compile (always LLM in Phase 1)
 	queryBackend   agent.AgentBackend
+	coordinator    *agent.BatchCoordinator
 
 	// wikiMu serializes all wiki-mutating operations: compile turns, ACP
 	// ingest turns, and query/recall turns (QueryTools includes write_wiki_page).
@@ -61,6 +65,7 @@ type Handler struct {
 	wikiBackendName  string // "llm" or "acp"
 	queryBackendName string // "llm"
 	acpProvider      string // "claude" (Phase 1) — only when wikiBackendName=="acp"
+	adminToken       string
 }
 
 const (
@@ -89,6 +94,8 @@ type Options struct {
 	QueryBackend string
 	// ACPConfig is required when WikiBackend == "acp".
 	ACPConfig *agent.ACPBackendConfig
+	// CoordinatorConfig controls ACP batch scheduling. Zero fields use defaults.
+	CoordinatorConfig agent.CoordinatorConfig
 }
 
 // New creates a new API handler with all agents wired up.
@@ -174,7 +181,7 @@ func NewWithOptions(dataDir string, llm agent.LLM, opts Options) (*Handler, erro
 		return nil, fmt.Errorf("unknown QUERY_BACKEND %q (use 'llm')", queryBackendName)
 	}
 
-	return &Handler{
+	handler := &Handler{
 		store:                        store,
 		wikiBackend:                  wikiBackend,
 		compileBackend:               compileBackend,
@@ -194,7 +201,23 @@ func NewWithOptions(dataDir string, llm agent.LLM, opts Options) (*Handler, erro
 		wikiBackendName:              wikiBackendName,
 		queryBackendName:             queryBackendName,
 		acpProvider:                  acpProvider,
-	}, nil
+		adminToken:                   os.Getenv("ENGRAM9_ADMIN_TOKEN"),
+	}
+	if wikiBackendName == "acp" {
+		acpBackend := wikiBackend.(*agent.ACPBackend)
+		pendingStore, storeErr := agent.NewPendingEventStore(dataDir, agent.NewStoreEventSource(store), agent.StoreConfig{
+			BootstrapEpoch: os.Getenv("BATCH_INGEST_EPOCH"),
+		})
+		if storeErr != nil {
+			log.Printf("[batch-ingest] disabled: %v", storeErr)
+		} else {
+			indexRebuilder := agent.WikiIndexRebuilderFunc(func() error { return handler.store.RebuildIndex() })
+			handler.coordinator = agent.NewBatchCoordinator(
+				acpBackend, pendingStore, indexRebuilder, &handler.wikiMu, filepath.Join(dataDir, "wiki"), opts.CoordinatorConfig,
+			)
+		}
+	}
+	return handler, nil
 }
 
 // Routes returns an http.Handler with all API routes.
@@ -204,6 +227,8 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /recall", h.handleRecall)
 	mux.HandleFunc("POST /compile", h.handleCompile)
 	mux.HandleFunc("GET /status", h.handleStatus)
+	mux.HandleFunc("POST /admin/events/{id}/reset", h.handleResetEvent)
+	mux.HandleFunc("POST /admin/events/{id}/confirm", h.handleConfirmEvent)
 	return mux
 }
 
@@ -284,11 +309,29 @@ func (h *Handler) handleRemember(w http.ResponseWriter, r *http.Request) {
 		EvidenceKind:  evidenceKind,
 		TrustTier:     trustTier,
 	}
+	if len(req.Context) > 0 {
+		contextJSON, err := json.Marshal(req.Context)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, APIResponse{Error: "invalid context"})
+			return
+		}
+		ev.ContextJSON = string(contextJSON)
+	}
+
+	if h.wikiBackendName == "acp" && h.coordinator == nil {
+		writeJSON(w, http.StatusServiceUnavailable, APIResponse{Error: "batch ingest not configured (set BATCH_INGEST_EPOCH)"})
+		return
+	}
 
 	eventID, err := h.store.AppendEvent(ev)
 	if err != nil {
 		log.Printf("[api] remember append error: %v", err)
 		writeJSON(w, http.StatusInternalServerError, APIResponse{Error: err.Error()})
+		return
+	}
+	if h.wikiBackendName == "acp" {
+		h.coordinator.NotifyNewEvent(eventID)
+		writeJSON(w, http.StatusOK, RememberResponse{EventID: eventID})
 		return
 	}
 
@@ -350,7 +393,7 @@ func (h *Handler) handleRecall(w http.ResponseWriter, r *http.Request) {
 
 	// Inject recent events so the LLM can answer even if wiki integration is still pending.
 	var recentEvents []storage.Event
-	if h.pendingIntegrations.Load() > 0 {
+	if h.hasPendingIntegrations() {
 		recentEvents, _ = h.store.ReadRecentEvents(10)
 	}
 
@@ -409,10 +452,11 @@ type StatusResponse struct {
 	LLMModel                     string `json:"llm_model,omitempty"`
 	LLMBaseURL                   string `json:"llm_base_url,omitempty"`
 	// Per-capability backend identifiers.
-	IngestBackend  string `json:"ingest_backend"`
-	CompileBackend string `json:"compile_backend"`
-	QueryBackend   string `json:"query_backend"`
-	ACPProvider    string `json:"acp_provider,omitempty"`
+	IngestBackend  string                   `json:"ingest_backend"`
+	CompileBackend string                   `json:"compile_backend"`
+	QueryBackend   string                   `json:"query_backend"`
+	ACPProvider    string                   `json:"acp_provider,omitempty"`
+	BatchIngest    *agent.CoordinatorStatus `json:"batch_ingest,omitempty"`
 }
 
 func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -422,10 +466,19 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	pendingIntegrations := h.pendingIntegrations.Load()
+	ingestErrorCount := h.ingestErrors.Load()
+	var batchIngest *agent.CoordinatorStatus
+	if h.coordinator != nil {
+		status := h.coordinator.Status()
+		batchIngest = &status
+		pendingIntegrations = int64(status.Pending + status.InProgress)
+		ingestErrorCount = int64(status.ActionableFailures)
+	}
 	writeJSON(w, http.StatusOK, StatusResponse{
 		MemoryStats:                  *stats,
-		PendingIntegrations:          h.pendingIntegrations.Load(),
-		IngestErrorCount:             h.ingestErrors.Load(),
+		PendingIntegrations:          pendingIntegrations,
+		IngestErrorCount:             ingestErrorCount,
 		IngestTimeout:                h.effectiveIngestTimeout().String(),
 		MaxConcurrentIntegrations:    h.maxConcurrentIntegrations,
 		MaxToolLoops:                 h.maxToolLoops,
@@ -441,11 +494,78 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		CompileBackend:               "llm", // always LLM in Phase 1
 		QueryBackend:                 h.queryBackendName,
 		ACPProvider:                  h.acpProvider,
+		BatchIngest:                  batchIngest,
 	})
+}
+
+func (h *Handler) handleResetEvent(w http.ResponseWriter, r *http.Request) {
+	h.handleAdminTransition(w, r, h.coordinatorReset)
+}
+
+func (h *Handler) handleConfirmEvent(w http.ResponseWriter, r *http.Request) {
+	h.handleAdminTransition(w, r, h.coordinatorConfirm)
+}
+
+func (h *Handler) handleAdminTransition(w http.ResponseWriter, r *http.Request, transition func(string) (agent.AdminResult, error)) {
+	if !h.adminAuthorized(r.Header.Get("X-Admin-Token")) {
+		writeJSON(w, http.StatusForbidden, APIResponse{Error: "forbidden"})
+		return
+	}
+	if h.coordinator == nil {
+		writeJSON(w, http.StatusServiceUnavailable, APIResponse{Error: "batch ingest not configured"})
+		return
+	}
+	result, err := transition(r.PathValue("id"))
+	if err == nil {
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
+	if errors.Is(err, agent.ErrEventNotFound) {
+		writeJSON(w, http.StatusNotFound, APIResponse{Error: "event not found"})
+		return
+	}
+	var transitionError *agent.TransitionError
+	if errors.As(err, &transitionError) {
+		writeJSON(w, http.StatusConflict, struct {
+			Error         string `json:"error"`
+			CurrentStatus string `json:"current_status"`
+		}{Error: transitionError.Message, CurrentStatus: transitionError.CurrentStatus})
+		return
+	}
+	log.Printf("[batch-ingest] admin transition failed: %v", err)
+	writeJSON(w, http.StatusInternalServerError, APIResponse{Error: "internal error"})
+}
+
+func (h *Handler) coordinatorReset(eventID string) (agent.AdminResult, error) {
+	return h.coordinator.ResetEvent(eventID)
+}
+
+func (h *Handler) coordinatorConfirm(eventID string) (agent.AdminResult, error) {
+	return h.coordinator.ConfirmEvent(eventID)
+}
+
+func (h *Handler) adminAuthorized(provided string) bool {
+	if h.adminToken == "" || len(provided) != len(h.adminToken) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(h.adminToken)) == 1
 }
 
 // Wait blocks until all background integrations finish. Used for testing and graceful shutdown.
 func (h *Handler) Wait() { h.wg.Wait() }
+
+func (h *Handler) StartBatchCoordinator(timeout time.Duration) error {
+	if h.coordinator == nil {
+		return nil
+	}
+	return h.coordinator.Start(timeout)
+}
+
+func (h *Handler) StopBatchCoordinator(ctx context.Context) {
+	if h.coordinator != nil {
+		h.coordinator.Stop(ctx)
+	}
+}
 
 func (h *Handler) EffectiveIngestTimeout() time.Duration {
 	return h.effectiveIngestTimeout()
@@ -480,6 +600,14 @@ func (h *Handler) effectiveIngestTimeout() time.Duration {
 		return h.ingestTimeout
 	}
 	return defaultIngestTimeout
+}
+
+func (h *Handler) hasPendingIntegrations() bool {
+	if h.coordinator != nil {
+		status := h.coordinator.Status()
+		return status.Pending+status.InProgress > 0
+	}
+	return h.pendingIntegrations.Load() > 0
 }
 
 func ingestTimeoutFromEnv() time.Duration {
