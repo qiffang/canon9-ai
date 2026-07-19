@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -97,6 +98,45 @@ read prompt
 	require.Equal(t, "failed", result.Status)
 	require.ErrorContains(t, result.Error, "prompt response missing")
 	require.Equal(t, "crash", result.errorClass())
+}
+
+func TestACPBackendRunBatchIngestMapsTransportEOFToShutdownCancellation(t *testing.T) {
+	markerPath := filepath.Join(t.TempDir(), "prompt-read")
+	backend := newScriptedACPBackend(t, fmt.Sprintf(`
+read initialize
+echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}'
+read initialized
+read session
+echo '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"session"}}'
+read prompt
+: > %q
+read blocked
+	`, markerPath))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resultCh := make(chan BatchResult, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		result, err := backend.RunBatchIngest(ctx, makeBatch([]PendingEvent{{ID: "a"}}, 2), &sync.Mutex{}, func() error { return nil })
+		resultCh <- result
+		errCh <- err
+	}()
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(markerPath)
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+
+	cancel()
+
+	select {
+	case result := <-resultCh:
+		require.NoError(t, <-errCh)
+		require.Equal(t, "failed", result.Status)
+		require.ErrorIs(t, result.Error, context.Canceled)
+		require.True(t, result.IsShutdownCancel())
+	case <-time.After(time.Second):
+		t.Fatal("RunBatchIngest did not return after cancellation")
+	}
 }
 
 func TestACPBackendRunBatchIngestReportsIndexStale(t *testing.T) {

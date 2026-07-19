@@ -181,7 +181,11 @@ func (b *ACPBackend) RunBatchIngest(ctx context.Context, batch Batch, wikiMu *sy
 	turnResult, err := b.runACPTurnFull(ctx, BuildBatchPrompt(batch), ValidateOptions{AllowDelete: false})
 	if err != nil {
 		wikiMu.Unlock()
-		result.Error = err
+		if errors.Is(ctx.Err(), context.Canceled) {
+			result.Error = context.Canceled
+		} else {
+			result.Error = err
+		}
 		return finish(), nil
 	}
 	result.Summary = turnResult.Summary
